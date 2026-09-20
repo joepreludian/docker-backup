@@ -48,7 +48,13 @@ pub fn human_size(bytes: u64) -> String {
     } else if value < 10.0 {
         format!("{value:.1} {}", UNITS[unit])
     } else {
-        format!("{value:.0} {}", UNITS[unit])
+        // Check if rounded value reaches 1024; if so and larger unit exists, bump unit
+        let rounded = value.round() as i64;
+        if rounded >= 1024 && unit < UNITS.len() - 1 {
+            format!("1.0 {}", UNITS[unit + 1])
+        } else {
+            format!("{value:.0} {}", UNITS[unit])
+        }
     }
 }
 
@@ -184,6 +190,9 @@ mod tests {
             human_size(5 * 1024 * 1024 * 1024 + 512 * 1024 * 1024),
             "5.5 GiB"
         );
+        // Values that round to 1024 should bump to next unit
+        assert_eq!(human_size(1_048_064), "1.0 MiB");
+        assert_eq!(human_size(1_073_689_394), "1.0 GiB");
     }
 
     #[test]
