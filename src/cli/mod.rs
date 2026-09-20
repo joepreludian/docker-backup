@@ -156,6 +156,8 @@ impl RestoreArgs {
                 images: !self.no_images,
                 containers: !self.no_containers,
                 container_tag: self.container_tag.clone(),
+                // Task 7 adds the `--force-import-if-arch-mismatch` flag.
+                force_arch_mismatch: false,
             },
             verify: !self.skip_verify,
         }

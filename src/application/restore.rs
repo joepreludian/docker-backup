@@ -43,14 +43,14 @@ impl RestoreService<'_> {
             }
         }
 
-        self.docker.engine_info()?;
+        let target = self.docker.engine_info()?.platform();
         let existing: Vec<String> = self
             .docker
             .list_volumes()?
             .into_iter()
             .map(|v| v.name)
             .collect();
-        let plan = RestorePlan::build(&manifest, &existing, &request.policy);
+        let plan = RestorePlan::build(&manifest, &existing, &request.policy, &target);
         if plan
             .volumes
             .iter()
@@ -79,6 +79,8 @@ impl RestoreService<'_> {
                     planned.exists,
                     request.policy.overwrite,
                 ),
+                // Volumes carry no platform, so `RestorePlan::build` never assigns them this action.
+                RestoreAction::SkipArchMismatch => unreachable!("volumes have no architecture"),
             };
             self.progress
                 .item_finished(ItemKind::Volume, name, &outcome);
@@ -90,46 +92,50 @@ impl RestoreService<'_> {
             });
         }
 
+        // Task 5 wires the skip: every planned image is restored for now,
+        // regardless of `image.action`.
         for image in &plan.images {
             index += 1;
             self.progress
-                .item_started(ItemKind::Image, &image.reference, index);
+                .item_started(ItemKind::Image, &image.entry.reference, index);
             let outcome = to_outcome(
                 self.store
-                    .open_item(&root.join(&image.file), compression)
+                    .open_item(&root.join(&image.entry.file), compression)
                     .and_then(|mut reader| self.docker.load_image(&mut reader)),
             );
             self.progress
-                .item_finished(ItemKind::Image, &image.reference, &outcome);
+                .item_finished(ItemKind::Image, &image.entry.reference, &outcome);
             items.push(ItemResult {
                 kind: ItemKind::Image,
-                name: image.reference.clone(),
-                file: Some(image.file.clone()),
+                name: image.entry.reference.clone(),
+                file: Some(image.entry.file.clone()),
                 outcome,
             });
         }
 
+        // Task 5 wires the skip: every planned container is restored for now,
+        // regardless of `container.action`.
         for container in &plan.containers {
             index += 1;
             self.progress
-                .item_started(ItemKind::Container, &container.name, index);
+                .item_started(ItemKind::Container, &container.entry.name, index);
             // Docker rejects uppercase in an image name, container names allow it.
             let tag = format!(
                 "{}:{}",
-                container.name.to_ascii_lowercase(),
+                container.entry.name.to_ascii_lowercase(),
                 request.policy.container_tag
             );
             let outcome = to_outcome(
                 self.store
-                    .open_item(&root.join(&container.file), compression)
+                    .open_item(&root.join(&container.entry.file), compression)
                     .and_then(|mut reader| self.docker.import_container_fs(&mut reader, &tag)),
             );
             self.progress
-                .item_finished(ItemKind::Container, &container.name, &outcome);
+                .item_finished(ItemKind::Container, &container.entry.name, &outcome);
             items.push(ItemResult {
                 kind: ItemKind::Container,
-                name: container.name.clone(),
-                file: Some(container.file.clone()),
+                name: container.entry.name.clone(),
+                file: Some(container.entry.file.clone()),
                 outcome,
             });
         }

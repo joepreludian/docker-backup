@@ -1,8 +1,12 @@
 //! Pure planning: which items a backup or restore will touch, and how.
 
+use std::path::Path;
+
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::manifest::{ContainerEntry, ImageEntry, Manifest, VolumeEntry};
-use crate::domain::refs::{ContainerRef, ImageOrigin, ImageRef, VolumeRef};
+use crate::domain::platform::Platform;
+use crate::domain::preview::{MismatchedItem, RestorePreview};
+use crate::domain::refs::{ContainerRef, ImageOrigin, ImageRef, ItemKind, VolumeRef};
 
 #[derive(Debug, Clone, Default)]
 pub struct Inventory {
@@ -100,6 +104,7 @@ pub struct RestorePolicy {
     pub images: bool,
     pub containers: bool,
     pub container_tag: String,
+    pub force_arch_mismatch: bool,
 }
 
 impl Default for RestorePolicy {
@@ -111,6 +116,7 @@ impl Default for RestorePolicy {
             images: true,
             containers: true,
             container_tag: "restored".to_string(),
+            force_arch_mismatch: false,
         }
     }
 }
@@ -120,6 +126,7 @@ pub enum RestoreAction {
     Restore,
     SkipExisting,
     SkipVolatile,
+    SkipArchMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,15 +136,35 @@ pub struct PlannedVolume {
     pub exists: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedImage {
+    pub entry: ImageEntry,
+    pub platform: Platform,
+    pub action: RestoreAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedContainer {
+    pub entry: ContainerEntry,
+    pub platform: Platform,
+    pub action: RestoreAction,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RestorePlan {
     pub volumes: Vec<PlannedVolume>,
-    pub images: Vec<ImageEntry>,
-    pub containers: Vec<ContainerEntry>,
+    pub images: Vec<PlannedImage>,
+    pub containers: Vec<PlannedContainer>,
+    pub target: Platform,
 }
 
 impl RestorePlan {
-    pub fn build(manifest: &Manifest, existing_volumes: &[String], policy: &RestorePolicy) -> Self {
+    pub fn build(
+        manifest: &Manifest,
+        existing_volumes: &[String],
+        policy: &RestorePolicy,
+        target: &Platform,
+    ) -> Self {
         let volumes = if policy.volumes {
             manifest
                 .volumes
@@ -162,12 +189,36 @@ impl RestorePlan {
             Vec::new()
         };
         let images = if policy.images {
-            manifest.images.clone()
+            manifest
+                .images
+                .iter()
+                .map(|entry| {
+                    let platform = manifest.image_platform(entry);
+                    let action = arch_action(&platform, target, policy);
+                    PlannedImage {
+                        entry: entry.clone(),
+                        platform,
+                        action,
+                    }
+                })
+                .collect()
         } else {
             Vec::new()
         };
         let containers = if policy.containers {
-            manifest.containers.clone()
+            manifest
+                .containers
+                .iter()
+                .map(|entry| {
+                    let platform = manifest.container_platform(entry);
+                    let action = arch_action(&platform, target, policy);
+                    PlannedContainer {
+                        entry: entry.clone(),
+                        platform,
+                        action,
+                    }
+                })
+                .collect()
         } else {
             Vec::new()
         };
@@ -175,6 +226,81 @@ impl RestorePlan {
             volumes,
             images,
             containers,
+            target: target.clone(),
+        }
+    }
+
+    /// A dry-run summary of this plan: counts, and the list of arch mismatches.
+    pub fn preview(
+        &self,
+        manifest: &Manifest,
+        source: &Path,
+        policy: &RestorePolicy,
+    ) -> RestorePreview {
+        let volumes_to_create = self
+            .volumes
+            .iter()
+            .filter(|v| v.action == RestoreAction::Restore && !v.exists)
+            .count();
+        let volumes_to_overwrite = self
+            .volumes
+            .iter()
+            .filter(|v| v.action == RestoreAction::Restore && v.exists)
+            .count();
+        let volumes_skipped = self
+            .volumes
+            .iter()
+            .filter(|v| {
+                matches!(
+                    v.action,
+                    RestoreAction::SkipExisting | RestoreAction::SkipVolatile
+                )
+            })
+            .count();
+        let images_to_load = self
+            .images
+            .iter()
+            .filter(|i| i.action == RestoreAction::Restore)
+            .count();
+        let containers_to_import = self
+            .containers
+            .iter()
+            .filter(|c| c.action == RestoreAction::Restore)
+            .count();
+
+        let mut mismatches = Vec::new();
+        for image in &self.images {
+            if !image.platform.matches(&self.target) {
+                mismatches.push(MismatchedItem {
+                    kind: ItemKind::Image,
+                    name: image.entry.reference.clone(),
+                    platform: image.platform.clone(),
+                });
+            }
+        }
+        for container in &self.containers {
+            if !container.platform.matches(&self.target) {
+                mismatches.push(MismatchedItem {
+                    kind: ItemKind::Container,
+                    name: container.entry.name.clone(),
+                    platform: container.platform.clone(),
+                });
+            }
+        }
+
+        RestorePreview {
+            source: source.to_path_buf(),
+            created_at: manifest.created_at,
+            backup_platform: manifest.docker.platform(),
+            target_platform: self.target.clone(),
+            overwrite: policy.overwrite,
+            force_arch_mismatch: policy.force_arch_mismatch,
+            volumes_to_create,
+            volumes_to_overwrite,
+            volumes_skipped,
+            images_to_load,
+            containers_to_import,
+            mismatches,
         }
     }
 
@@ -184,6 +310,16 @@ impl RestorePlan {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// `Restore` when the item's platform matches the target (or mismatches are
+/// forced through anyway), `SkipArchMismatch` otherwise.
+fn arch_action(platform: &Platform, target: &Platform, policy: &RestorePolicy) -> RestoreAction {
+    if platform.matches(target) || policy.force_arch_mismatch {
+        RestoreAction::Restore
+    } else {
+        RestoreAction::SkipArchMismatch
     }
 }
 
@@ -290,7 +426,11 @@ mod tests {
     fn manifest() -> Manifest {
         let mut m = Manifest::new(
             datetime!(2026-09-19 00:00:00 UTC),
-            DockerInfo::default(),
+            DockerInfo {
+                os: "linux".into(),
+                arch: "amd64".into(),
+                ..DockerInfo::default()
+            },
             Compression::None,
         );
         for (name, volatile) in [
@@ -314,7 +454,7 @@ mod tests {
             size_bytes: 1,
             sha256: Sha256Digest::of(b"y"),
             origin: ImageOrigin::Built,
-            platform: None,
+            platform: Some(Platform::new("linux", "amd64")),
             inspect: json!({}),
         });
         m.containers.push(ContainerEntry {
@@ -336,6 +476,7 @@ mod tests {
             &manifest(),
             &["cache".to_string()],
             &RestorePolicy::default(),
+            &Platform::new("linux", "amd64"),
         );
         let actions: Vec<(&str, RestoreAction, bool)> = plan
             .volumes
@@ -357,7 +498,12 @@ mod tests {
             include_volatile: true,
             ..RestorePolicy::default()
         };
-        let plan = RestorePlan::build(&manifest(), &["cache".to_string()], &policy);
+        let plan = RestorePlan::build(
+            &manifest(),
+            &["cache".to_string()],
+            &policy,
+            &Platform::new("linux", "amd64"),
+        );
         assert!(
             plan.volumes
                 .iter()
@@ -374,7 +520,84 @@ mod tests {
             containers: false,
             ..RestorePolicy::default()
         };
-        let plan = RestorePlan::build(&manifest(), &[], &policy);
+        let plan = RestorePlan::build(&manifest(), &[], &policy, &Platform::new("linux", "amd64"));
         assert_eq!(plan.len(), 0);
+    }
+
+    #[test]
+    fn images_on_another_arch_are_skipped_unless_forced() {
+        let m = manifest();
+        let arm = Platform::new("linux", "arm64");
+        let plan = RestorePlan::build(&m, &[], &RestorePolicy::default(), &arm);
+        assert_eq!(plan.images[0].action, RestoreAction::SkipArchMismatch);
+        assert_eq!(
+            plan.containers[0].action,
+            RestoreAction::SkipArchMismatch,
+            "container falls back to manifest docker arch"
+        );
+
+        let forced = RestorePolicy {
+            force_arch_mismatch: true,
+            ..RestorePolicy::default()
+        };
+        let plan = RestorePlan::build(&m, &[], &forced, &arm);
+        assert_eq!(plan.images[0].action, RestoreAction::Restore);
+        assert_eq!(plan.containers[0].action, RestoreAction::Restore);
+    }
+
+    #[test]
+    fn same_arch_restores_everything() {
+        let m = manifest();
+        let plan = RestorePlan::build(
+            &m,
+            &[],
+            &RestorePolicy::default(),
+            &Platform::new("linux", "amd64"),
+        );
+        assert!(
+            plan.images
+                .iter()
+                .all(|i| i.action == RestoreAction::Restore)
+        );
+        assert!(
+            plan.containers
+                .iter()
+                .all(|c| c.action == RestoreAction::Restore)
+        );
+    }
+
+    #[test]
+    fn preview_counts_and_lists_mismatches() {
+        let m = manifest();
+        let arm = Platform::new("linux", "arm64");
+        let policy = RestorePolicy {
+            overwrite: true,
+            ..RestorePolicy::default()
+        };
+        let plan = RestorePlan::build(&m, &["pgdata".into()], &policy, &arm);
+        let preview = plan.preview(&m, Path::new("/b"), &policy);
+        assert_eq!(preview.backup_platform, Platform::new("linux", "amd64"));
+        assert_eq!(preview.target_platform, arm);
+        assert!(preview.overwrite);
+        assert_eq!(preview.volumes_to_overwrite, 1);
+        assert_eq!(preview.images_to_load, 0);
+        assert_eq!(preview.containers_to_import, 0);
+        assert_eq!(preview.mismatches.len(), 2);
+        assert_eq!(preview.mismatches[0].kind, ItemKind::Image);
+        assert_eq!(preview.skipped_for_arch(), 2);
+
+        let forced = RestorePolicy {
+            force_arch_mismatch: true,
+            ..policy
+        };
+        let plan = RestorePlan::build(&m, &[], &forced, &arm);
+        let preview = plan.preview(&m, Path::new("/b"), &forced);
+        assert_eq!(preview.images_to_load, 1);
+        assert_eq!(
+            preview.mismatches.len(),
+            2,
+            "mismatches are still listed when forced"
+        );
+        assert_eq!(preview.skipped_for_arch(), 0);
     }
 }
