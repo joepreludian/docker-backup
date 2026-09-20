@@ -203,7 +203,10 @@ impl BackupService<'_> {
         let final_output = match temp_root {
             Some(temp) => {
                 let archive = archive_path(&output);
-                self.store.pack_folder(&work_dir, &archive)?;
+                if let Err(error) = self.store.pack_folder(&work_dir, &archive) {
+                    let _ = self.store.remove_dir_all(&temp);
+                    return Err(error);
+                }
                 self.store.remove_dir_all(&temp)?;
                 archive
             }
@@ -499,6 +502,26 @@ mod tests {
                 .is_empty()
         );
         assert!(!store.exists(Path::new("/backups/out")));
+    }
+
+    #[test]
+    fn pack_failure_removes_the_temp_dir_and_returns_the_error() {
+        let (docker, store, progress) = (
+            docker(),
+            MemoryArchiveStore::new(),
+            RecordingProgress::default(),
+        );
+        store.fail_pack.set(true);
+        let mut req = request(BackupScope::default());
+        req.single_archive = true;
+        let err = run(&docker, &store, &progress, &req).unwrap_err();
+        assert!(matches!(err, AppError::ToolFailed { .. }));
+        assert!(
+            store
+                .paths_under(Path::new("/backups/.docker-backup-tmp-1"))
+                .is_empty()
+        );
+        assert!(!store.exists(Path::new("/backups/out.tar.bz2")));
     }
 
     #[test]

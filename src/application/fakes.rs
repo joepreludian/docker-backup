@@ -1,6 +1,6 @@
 //! In-memory implementations of the ports, used only by unit tests.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -268,6 +268,7 @@ pub struct MemoryArchiveStore {
     pub dirs: RefCell<BTreeSet<PathBuf>>,
     pub packed: RefCell<Vec<(PathBuf, PathBuf)>>,
     pub unpacked: RefCell<Vec<(PathBuf, PathBuf)>>,
+    pub fail_pack: Cell<bool>,
     temp_counter: RefCell<usize>,
 }
 
@@ -365,6 +366,12 @@ impl ArchiveStore for MemoryArchiveStore {
     }
 
     fn pack_folder(&self, folder: &Path, archive: &Path) -> AppResult<()> {
+        if self.fail_pack.get() {
+            return Err(AppError::ToolFailed {
+                command: "tar -cjf".into(),
+                stderr: "fake pack failure".into(),
+            });
+        }
         let entries: Vec<(String, Vec<u8>)> = self
             .files
             .borrow()
