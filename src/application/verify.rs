@@ -8,16 +8,17 @@ use crate::domain::manifest::{MANIFEST_FILE, Manifest};
 use crate::domain::naming::is_archive;
 use crate::domain::verification::{FileCheck, FileStatus, VerificationReport};
 
+#[derive(Debug)]
 pub struct LocatedBackup {
     pub root: PathBuf,
     pub temp: Option<PathBuf>,
 }
 
 impl LocatedBackup {
-    pub fn cleanup(&self, store: &dyn ArchiveStore) -> AppResult<()> {
-        match &self.temp {
-            Some(temp) => store.remove_dir_all(temp),
-            None => Ok(()),
+    /// Best-effort: scratch cleanup must never mask the operation's own result.
+    pub fn cleanup(&self, store: &dyn ArchiveStore) {
+        if let Some(temp) = &self.temp {
+            let _ = store.remove_dir_all(temp);
         }
     }
 }
@@ -36,7 +37,10 @@ pub fn locate_backup(store: &dyn ArchiveStore, source: &Path) -> AppResult<Locat
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let temp = store.make_temp_dir(&parent)?;
-    store.unpack_archive(source, &temp)?;
+    if let Err(error) = store.unpack_archive(source, &temp) {
+        let _ = store.remove_dir_all(&temp);
+        return Err(error);
+    }
     Ok(LocatedBackup {
         root: temp.clone(),
         temp: Some(temp),
@@ -133,8 +137,21 @@ mod tests {
         let located = locate_backup(&store, Path::new("/x/out.tar.bz2")).unwrap();
         assert!(located.temp.is_some());
         assert!(store.exists(&located.root.join("manifest.json")));
-        located.cleanup(&store).unwrap();
+        located.cleanup(&store);
         assert!(!store.exists(&located.root));
+    }
+
+    #[test]
+    fn unpack_failure_removes_the_temp_dir_and_returns_the_error() {
+        let store = MemoryArchiveStore::new();
+        store.put("/x/out/manifest.json", b"{}");
+        store
+            .pack_folder(Path::new("/x/out"), Path::new("/x/out.tar.bz2"))
+            .unwrap();
+        store.fail_unpack.set(true);
+        let err = locate_backup(&store, Path::new("/x/out.tar.bz2")).unwrap_err();
+        assert!(matches!(err, AppError::ToolFailed { .. }));
+        assert!(!store.exists(Path::new("/x/.docker-backup-tmp-1")));
     }
 
     #[test]

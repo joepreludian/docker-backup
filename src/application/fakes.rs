@@ -269,6 +269,7 @@ pub struct MemoryArchiveStore {
     pub packed: RefCell<Vec<(PathBuf, PathBuf)>>,
     pub unpacked: RefCell<Vec<(PathBuf, PathBuf)>>,
     pub fail_pack: Cell<bool>,
+    pub fail_unpack: Cell<bool>,
     temp_counter: RefCell<usize>,
 }
 
@@ -396,6 +397,12 @@ impl ArchiveStore for MemoryArchiveStore {
     }
 
     fn unpack_archive(&self, archive: &Path, into: &Path) -> AppResult<()> {
+        if self.fail_unpack.get() {
+            return Err(AppError::ToolFailed {
+                command: "tar -xjf".into(),
+                stderr: "fake unpack failure".into(),
+            });
+        }
         let blob = self.file(archive).ok_or_else(|| {
             AppError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,

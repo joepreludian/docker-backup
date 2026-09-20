@@ -27,10 +27,8 @@ impl RestoreService<'_> {
     pub fn run(&self, request: &RestoreRequest) -> AppResult<RestoreReport> {
         let located = locate_backup(self.store, &request.source)?;
         let result = self.run_in(&located.root, request);
-        let cleanup = located.cleanup(self.store);
-        let report = result?;
-        cleanup?;
-        Ok(report)
+        located.cleanup(self.store);
+        result
     }
 
     fn run_in(&self, root: &Path, request: &RestoreRequest) -> AppResult<RestoreReport> {
