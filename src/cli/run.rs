@@ -41,8 +41,11 @@ pub fn run() -> i32 {
     let progress = StderrProgress::new();
     let tools = WhichToolLocator;
 
-    let mut stdout = io::stdout().lock();
-    let mut stderr = io::stderr().lock();
+    // Unlocked handles: `Write` locks per call, so this doesn't hold stdout/stderr
+    // for the whole run. `StderrProgress`'s ticker thread writes to stderr every
+    // 120ms; holding a lock here for the run's duration would deadlock against it.
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
 
     let result: AppResult<i32> = match &cli.command {
         Command::Backup(args) => {

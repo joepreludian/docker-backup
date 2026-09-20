@@ -60,8 +60,13 @@ pub struct BackupArgs {
     /// Also export anonymous (volatile) volumes.
     #[arg(long)]
     pub include_volatile: bool,
-    /// Containers whose filesystem should be exported.
-    #[arg(long, num_args = 1.., value_name = "NAME")]
+    /// Container to export (repeat the flag or separate names with commas).
+    #[arg(
+        long,
+        value_name = "NAME",
+        value_delimiter = ',',
+        action = clap::ArgAction::Append
+    )]
     pub containers: Vec<String>,
     /// Compress each item individually with bzip2.
     #[arg(long, conflicts_with = "single_archive")]
@@ -180,6 +185,7 @@ mod tests {
             "--include-volatile",
             "--containers",
             "web",
+            "--containers",
             "db",
             "--per-file-bzip2",
             "/tmp/out",
@@ -195,6 +201,23 @@ mod tests {
         assert_eq!(request.scope.containers, vec!["web", "db"]);
         assert_eq!(request.compression, Compression::Bzip2PerFile);
         assert!(!request.single_archive);
+    }
+
+    #[test]
+    fn containers_accept_comma_lists_and_never_swallow_output() {
+        let cli = Cli::try_parse_from([
+            "docker-backup",
+            "backup",
+            "--containers",
+            "web,db",
+            "/tmp/out",
+        ])
+        .unwrap();
+        let Command::Backup(args) = cli.command else {
+            panic!("expected backup")
+        };
+        assert_eq!(args.containers, vec!["web", "db"]);
+        assert_eq!(args.output, Some(PathBuf::from("/tmp/out")));
     }
 
     #[test]
