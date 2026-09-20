@@ -23,27 +23,49 @@ impl HumanRenderer {
             .load_preset(UTF8_FULL_CONDENSED)
             .set_content_arrangement(ContentArrangement::Dynamic)
             .set_header(header.to_vec());
+        if self.color {
+            // Tests (and piped output) aren't a tty; without this, comfy-table
+            // silently drops the `.fg(..)` styling applied to cells below.
+            table.enforce_styling();
+        }
         table
     }
 
+    /// Colours non-table text. The `color` flag alone decides — never `console`'s
+    /// own tty autodetection, which would ignore `color: true` on non-tty output.
     fn paint(&self, text: &str, tone: Tone) -> String {
         if !self.color {
             return text.to_string();
         }
         match tone {
-            Tone::Good => style(text).green().to_string(),
-            Tone::Warn => style(text).yellow().to_string(),
-            Tone::Bad => style(text).red().to_string(),
+            Tone::Good => style(text).force_styling(true).green().to_string(),
+            Tone::Warn => style(text).force_styling(true).yellow().to_string(),
+            Tone::Bad => style(text).force_styling(true).red().to_string(),
         }
     }
 
-    fn outcome_cell(&self, outcome: &ItemOutcome) -> String {
+    /// Colours a table cell via comfy-table's own styling instead of embedding
+    /// raw ANSI in the cell text, which would corrupt comfy-table's column-width
+    /// measurement.
+    fn cell(&self, text: &str, tone: Tone) -> Cell {
+        let cell = Cell::new(text);
+        if !self.color {
+            return cell;
+        }
+        match tone {
+            Tone::Good => cell.fg(comfy_table::Color::Green),
+            Tone::Warn => cell.fg(comfy_table::Color::Yellow),
+            Tone::Bad => cell.fg(comfy_table::Color::Red),
+        }
+    }
+
+    fn outcome_cell(&self, outcome: &ItemOutcome) -> Cell {
         let tone = match outcome {
             ItemOutcome::Done { .. } | ItemOutcome::Restored => Tone::Good,
             ItemOutcome::SkippedExisting | ItemOutcome::SkippedVolatile => Tone::Warn,
             ItemOutcome::Failed { .. } => Tone::Bad,
         };
-        self.paint(&outcome.label(), tone)
+        self.cell(&outcome.label(), tone)
     }
 
     fn items_table(&self, items: &[ItemResult]) -> Table {
@@ -53,7 +75,7 @@ impl HumanRenderer {
                 Cell::new(item.kind.to_string()),
                 Cell::new(&item.name),
                 Cell::new(item.file.as_deref().unwrap_or("-")),
-                Cell::new(self.outcome_cell(&item.outcome)),
+                self.outcome_cell(&item.outcome),
             ]);
         }
         table
@@ -127,7 +149,7 @@ impl Renderer for HumanRenderer {
         ]);
         meta.add_row(vec![
             Cell::new("Compression"),
-            Cell::new(format!("{:?}", m.compression).to_lowercase()),
+            Cell::new(m.compression.label()),
         ]);
         meta.add_row(vec![
             Cell::new("Items"),
@@ -146,17 +168,17 @@ impl Renderer for HumanRenderer {
 
         let mut files = self.table(&["Kind", "Name", "File", "Size", "Status"]);
         for check in &report.verification.files {
-            let status = match &check.status {
-                FileStatus::Ok => self.paint("ok", Tone::Good),
-                FileStatus::Missing => self.paint("missing", Tone::Bad),
-                FileStatus::Corrupt { .. } => self.paint("corrupt", Tone::Bad),
+            let (label, tone) = match &check.status {
+                FileStatus::Ok => ("ok", Tone::Good),
+                FileStatus::Missing => ("missing", Tone::Bad),
+                FileStatus::Corrupt { .. } => ("corrupt", Tone::Bad),
             };
             files.add_row(vec![
-                check.kind.to_string(),
-                check.name.clone(),
-                check.file.clone(),
-                human_size(check.size_bytes),
-                status,
+                Cell::new(check.kind.to_string()),
+                Cell::new(check.name.clone()),
+                Cell::new(check.file.clone()),
+                Cell::new(human_size(check.size_bytes)),
+                self.cell(label, tone),
             ]);
         }
         writeln!(out, "{files}")?;
@@ -169,7 +191,7 @@ impl Renderer for HumanRenderer {
             (Some(info), _) => {
                 docker.add_row(vec![
                     Cell::new("Status"),
-                    Cell::new(self.paint("available", Tone::Good)),
+                    self.cell("available", Tone::Good),
                 ]);
                 docker.add_row(vec![Cell::new("Context"), Cell::new(&info.context)]);
                 docker.add_row(vec![Cell::new("Host"), Cell::new(&info.host)]);
@@ -189,7 +211,7 @@ impl Renderer for HumanRenderer {
             (None, error) => {
                 docker.add_row(vec![
                     Cell::new("Status"),
-                    Cell::new(self.paint("unavailable", Tone::Bad)),
+                    self.cell("unavailable", Tone::Bad),
                 ]);
                 docker.add_row(vec![
                     Cell::new("Error"),
@@ -222,25 +244,17 @@ impl Renderer for HumanRenderer {
 
         let mut tools = self.table(&["Tool", "Required", "Status", "Path", "Version"]);
         for tool in &report.tools {
-            let (status, path, version) = match &tool.info {
-                Some(info) => (
-                    self.paint("found", Tone::Good),
-                    info.path.clone(),
-                    info.version.clone(),
-                ),
-                None if tool.required => (self.paint("missing", Tone::Bad), "-".into(), "-".into()),
-                None => (self.paint("missing", Tone::Warn), "-".into(), "-".into()),
+            let (status_label, tone, path, version) = match &tool.info {
+                Some(info) => ("found", Tone::Good, info.path.clone(), info.version.clone()),
+                None if tool.required => ("missing", Tone::Bad, "-".to_string(), "-".to_string()),
+                None => ("missing", Tone::Warn, "-".to_string(), "-".to_string()),
             };
             tools.add_row(vec![
-                tool.name.clone(),
-                if tool.required {
-                    "yes".into()
-                } else {
-                    "no".into()
-                },
-                status,
-                path,
-                version,
+                Cell::new(tool.name.clone()),
+                Cell::new(if tool.required { "yes" } else { "no" }),
+                self.cell(status_label, tone),
+                Cell::new(path),
+                Cell::new(version),
             ]);
         }
         writeln!(out, "{tools}")?;

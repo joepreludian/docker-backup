@@ -53,6 +53,14 @@ impl Compression {
             Compression::Bzip2PerFile => "tar.bz2",
         }
     }
+
+    /// Human-readable label matching this variant's serde (kebab-case) name.
+    pub fn label(self) -> &'static str {
+        match self {
+            Compression::None => "none",
+            Compression::Bzip2PerFile => "bzip2-per-file",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +291,12 @@ mod tests {
     fn compression_extensions() {
         assert_eq!(Compression::None.extension(), "tar");
         assert_eq!(Compression::Bzip2PerFile.extension(), "tar.bz2");
+    }
+
+    #[test]
+    fn compression_labels() {
+        assert_eq!(Compression::None.label(), "none");
+        assert_eq!(Compression::Bzip2PerFile.label(), "bzip2-per-file");
     }
 
     #[test]

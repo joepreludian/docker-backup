@@ -228,4 +228,54 @@ mod tests {
         assert!(out.is_empty());
         assert_eq!(String::from_utf8(err).unwrap(), "error: nope\n");
     }
+
+    /// Removes `ESC [ ... m` SGR sequences so table alignment can be checked on
+    /// the visible text alone, without pulling in a new dependency.
+    fn strip_ansi(text: &str) -> String {
+        let mut result = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' && chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                for c2 in chars.by_ref() {
+                    if c2 == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn human_color_true_emits_ansi_and_keeps_tables_aligned() {
+        let renderer = renderer_for(OutputFormat::Human, true);
+        let mut out = Vec::new();
+        renderer.render_backup(&backup_report(), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("\u{1b}["), "color=true should emit ANSI");
+
+        let stripped = strip_ansi(&text);
+        let mut widths = stripped
+            .lines()
+            .filter(|line| line.starts_with('\u{2502}'))
+            .map(|line| line.chars().count());
+        let first = widths.next().expect("at least one table row line");
+        for width in widths {
+            assert_eq!(
+                width, first,
+                "table rows must stay aligned once ANSI is stripped"
+            );
+        }
+    }
+
+    #[test]
+    fn human_info_shows_readable_compression_label() {
+        let mut report = info_report();
+        report.manifest.compression = Compression::Bzip2PerFile;
+        let text = render_human(|r, out| r.render_info(&report, out));
+        assert!(text.contains("bzip2-per-file"));
+    }
 }
