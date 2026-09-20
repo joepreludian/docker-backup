@@ -157,21 +157,46 @@ impl<W: Write> Write for HashingWriter<W> {
     }
 }
 
-/// Reads a child's stdout and reaps the child when dropped.
+/// Reads a child's stdout, checking its exit status once EOF is reached, and
+/// reaps the child (killing it if it is still running) when dropped.
 struct ChildReader {
     child: Child,
     stdout: ChildStdout,
+    stderr_thread: Option<thread::JoinHandle<String>>,
+    path: String,
+    done: bool,
 }
 
 impl Read for ChildReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.stdout.read(buf)
+        let read = self.stdout.read(buf)?;
+        if read == 0 && !self.done {
+            self.done = true;
+            let status = self.child.wait()?;
+            let stderr_text = self
+                .stderr_thread
+                .take()
+                .and_then(|handle| handle.join().ok())
+                .unwrap_or_default();
+            if !status.success() {
+                return Err(io::Error::other(format!(
+                    "bzip2 -dc {} failed: {}",
+                    self.path,
+                    stderr_text.trim()
+                )));
+            }
+        }
+        Ok(read)
     }
 }
 
 impl Drop for ChildReader {
     fn drop(&mut self) {
+        let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(handle) = self.stderr_thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -240,11 +265,23 @@ impl ArchiveStore for FsArchiveStore {
                     .arg(path)
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
+                    .stderr(Stdio::piped())
                     .spawn()
                     .map_err(|_| AppError::ToolMissing(self.bzip2.clone()))?;
                 let stdout = child.stdout.take().expect("piped stdout");
-                Ok(Box::new(ChildReader { child, stdout }))
+                let mut stderr = child.stderr.take().expect("piped stderr");
+                let stderr_thread = thread::spawn(move || {
+                    let mut text = String::new();
+                    let _ = stderr.read_to_string(&mut text);
+                    text
+                });
+                Ok(Box::new(ChildReader {
+                    child,
+                    stdout,
+                    stderr_thread: Some(stderr_thread),
+                    path: path.display().to_string(),
+                    done: false,
+                }))
             }
         }
     }
@@ -387,6 +424,45 @@ mod tests {
         let mut back = Vec::new();
         reader.read_to_end(&mut back).unwrap();
         assert_eq!(back, payload);
+    }
+
+    #[test]
+    fn corrupt_bzip2_item_reports_an_error() {
+        if !has("bzip2") {
+            eprintln!("bzip2 not installed, skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsArchiveStore::new();
+        let path = dir.path().join("bad.tar.bz2");
+        fs::write(&path, b"this is not bzip2 data").unwrap();
+        let mut reader = store.open_item(&path, Compression::Bzip2PerFile).unwrap();
+        let mut back = Vec::new();
+        let result = reader.read_to_end(&mut back);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dropping_a_bzip2_reader_early_does_not_hang() {
+        if !has("bzip2") {
+            eprintln!("bzip2 not installed, skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsArchiveStore::new();
+        let path = dir.path().join("big.tar.bz2");
+        let payload = vec![b'a'; 4 * 1024 * 1024];
+        store
+            .write_item(&path, Compression::Bzip2PerFile, &mut |sink| {
+                sink.write_all(&payload)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut reader = store.open_item(&path, Compression::Bzip2PerFile).unwrap();
+        let mut head = [0u8; 16];
+        reader.read_exact(&mut head).unwrap();
+        assert_eq!(&head, b"aaaaaaaaaaaaaaaa");
+        drop(reader);
     }
 
     #[test]
