@@ -165,6 +165,7 @@ impl DockerPort for FakeDocker {
 
     fn list_images(&self) -> AppResult<Vec<ImageRef>> {
         self.record("list_images".into());
+        self.check("list_images")?;
         Ok(self.images.iter().map(|(i, _)| i.clone()).collect())
     }
 

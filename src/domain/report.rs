@@ -168,7 +168,9 @@ pub struct DoctorReport {
 
 impl DoctorReport {
     pub fn is_healthy(&self) -> bool {
-        self.docker.is_some() && self.tools.iter().all(|t| !t.required || t.info.is_some())
+        self.docker.is_some()
+            && self.docker_error.is_none()
+            && self.tools.iter().all(|t| !t.required || t.info.is_some())
     }
 
     pub fn exit_code(&self) -> i32 {
@@ -293,6 +295,10 @@ mod tests {
         no_docker.docker_error = Some("cannot connect".into());
         assert!(!no_docker.is_healthy());
         assert_eq!(no_docker.exit_code(), 1);
+        let mut inventory_error = base.clone();
+        inventory_error.docker_error = Some("list_images failed".into());
+        assert!(!inventory_error.is_healthy());
+        assert_eq!(inventory_error.exit_code(), 1);
         let mut no_tar = base.clone();
         no_tar.tools.push(ToolStatus {
             name: "tar".into(),

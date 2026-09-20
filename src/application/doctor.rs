@@ -18,7 +18,13 @@ pub struct DoctorService<'a> {
 impl DoctorService<'_> {
     pub fn run(&self) -> AppResult<DoctorReport> {
         let (docker, docker_error, inventory) = match self.docker.engine_info() {
-            Ok(info) => (Some(info), None, collect_inventory(self.docker)?),
+            Ok(info) => {
+                let (docker_error, inventory) = match collect_inventory(self.docker) {
+                    Ok(inv) => (None, inv),
+                    Err(error) => (Some(error.to_string()), Inventory::default()),
+                };
+                (Some(info), docker_error, inventory)
+            }
             Err(error) => (None, Some(error.to_string()), Inventory::default()),
         };
 
@@ -145,6 +151,31 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("fake daemon down")
+        );
+        assert_eq!(report.images.total, 0);
+        assert!(!report.is_healthy());
+        assert_eq!(report.exit_code(), 1);
+    }
+
+    #[test]
+    fn doctor_reports_inventory_failure_without_aborting() {
+        let docker = FakeDocker::default()
+            .with_volume("v", b"")
+            .failing("list_images");
+        let tools = FakeTools::default().with("docker").with("tar");
+        let report = DoctorService {
+            docker: &docker,
+            tools: &tools,
+        }
+        .run()
+        .unwrap();
+        assert!(report.docker.is_some());
+        assert!(
+            report
+                .docker_error
+                .as_deref()
+                .unwrap()
+                .contains("list_images")
         );
         assert_eq!(report.images.total, 0);
         assert!(!report.is_healthy());
