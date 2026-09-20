@@ -1,0 +1,32 @@
+[package]
+name = "docker-backup"
+version = "0.1.0"
+edition = "2024"
+description = "Coordinate docker CLI backups and restores of volumes, images and containers"
+license = "MIT"
+
+[lib]
+name = "docker_backup"
+path = "src/lib.rs"
+
+[[bin]]
+name = "docker-backup"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2"
+comfy-table = "7"
+indicatif = "0.17"
+console = "0.15"
+which = "7"
+tempfile = "3"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
