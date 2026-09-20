@@ -1,0 +1,9 @@
+{
+  "Id": "sha256:b99678333a9d21194affcb33d8ad85fa56ed9806c9c569ef527c4959acc197b6",
+  "RepoTags": ["example-app:latest"],
+  "RepoDigests": ["example-app@sha256:b99678333a9d21194affcb33d8ad85fa56ed9806c9c569ef527c4959acc197b6"],
+  "Created": "2026-08-10T21:58:10Z",
+  "Os": "linux",
+  "Architecture": "arm64",
+  "Identity": { "Build": [ { "CreatedAt": "2026-08-10T21:58:10.912284966-03:00", "Ref": "jimzwzt44kjw15jan4mcm5r9n" } ] }
+}

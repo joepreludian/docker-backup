@@ -1,0 +1,9 @@
+{
+  "Id": "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+  "RepoTags": ["alpine:3", "alpine:latest"],
+  "RepoDigests": ["alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"],
+  "Created": "2026-05-01T00:00:00Z",
+  "Os": "linux",
+  "Architecture": "arm64",
+  "Identity": { "Pull": [ { "Repository": "docker.io/library/alpine" } ] }
+}
