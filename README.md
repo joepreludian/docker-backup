@@ -10,6 +10,15 @@ writes can also be restored by hand.
 
 Requires `docker`, `tar`, and (for bzip2 options) `bzip2` on PATH.
 
+## Quick start
+
+    docker-backup doctor                                   # daemon, counts, required tools
+    docker-backup backup ./my-backup --per-file-bzip2      # named volumes + built images
+    docker-backup info ./my-backup                         # manifest + hash check
+    docker-backup restore ./my-backup                      # skips volumes that already exist
+    docker-backup restore ./my-backup --overwrite          # wipes and refills every listed volume
+    docker-backup --json doctor | jq .                     # machine-readable output
+
 ## Usage
 
     docker-backup backup [OUTPUT_DIR] [--all-images] [--include-volatile]
