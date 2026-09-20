@@ -1,0 +1,6 @@
+/target
+/docs/specs/
+/docs/plans/
+*.tar
+*.tar.bz2
+!tests/fixtures/**
