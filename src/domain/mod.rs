@@ -3,3 +3,5 @@ pub mod manifest;
 pub mod naming;
 pub mod plan;
 pub mod refs;
+pub mod report;
+pub mod verification;
