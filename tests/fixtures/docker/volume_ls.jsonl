@@ -1,0 +1,3 @@
+{"Driver":"local","Labels":"com.docker.volume.anonymous=","Name":"0c7b4c7ad44ef288b64c11f9091e0e369147837cef3c93f2f83ad586c3e422bf","Scope":"local"}
+{"Driver":"local","Labels":"","Name":"pgdata","Scope":"local"}
+{"Driver":"local","Labels":"com.docker.compose.project=site","Name":"site_bundle","Scope":"local"}
