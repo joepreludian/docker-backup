@@ -16,6 +16,7 @@ use crate::domain::manifest::{
 };
 use crate::domain::naming::{FileNamer, archive_path, image_base_name, sanitize};
 use crate::domain::plan::{BackupPlan, BackupScope};
+use crate::domain::platform::Platform;
 use crate::domain::refs::ItemKind;
 use crate::domain::report::{BackupReport, ItemOutcome, ItemResult};
 
@@ -37,6 +38,7 @@ pub struct BackupService<'a> {
 impl BackupService<'_> {
     pub fn run(&self, request: &BackupRequest) -> AppResult<BackupReport> {
         let docker_info = self.docker.engine_info()?;
+        docker_info.require_platform()?;
         let inventory = collect_inventory(self.docker)?;
         let plan = BackupPlan::build(&inventory, &request.scope)?;
         self.check_output_is_free(request)?;
@@ -179,6 +181,7 @@ impl BackupService<'_> {
                     size_bytes: stored.size_bytes,
                     sha256: stored.sha256.clone(),
                     origin: image.origin,
+                    platform: Platform::from_image_inspect(inspect),
                     inspect: inspect.clone(),
                 });
             }
@@ -217,6 +220,7 @@ impl BackupService<'_> {
                     file: file.clone(),
                     size_bytes: stored.size_bytes,
                     sha256: stored.sha256.clone(),
+                    platform: self.container_platform(inspect),
                     inspect: inspect.clone(),
                 });
             }
@@ -253,6 +257,13 @@ impl BackupService<'_> {
             docker: docker_info.clone(),
             items,
         })
+    }
+
+    /// A container's platform is its image's. Best effort: `None` if the image is gone.
+    fn container_platform(&self, inspect: &Value) -> Option<Platform> {
+        let image = inspect.get("Image").and_then(Value::as_str)?;
+        let image_inspect = self.docker.inspect_image(image).ok()?;
+        Platform::from_image_inspect(&image_inspect)
     }
 
     /// Inspect, then stream the export into the store. Any error becomes the item's failure.
@@ -610,6 +621,48 @@ mod tests {
             "message was {err}"
         );
         assert_eq!(store.file("/backups/out.tar.bz2").unwrap(), b"OLD");
+    }
+
+    #[test]
+    fn backup_records_image_and_container_platform_from_inspect() {
+        let docker = FakeDocker::default()
+            .with_image("app:latest", ImageOrigin::Built, b"IMG")
+            .with_image_platform("app:latest", Platform::new("linux", "amd64"))
+            .with_container("web", "nginx", b"FS");
+        let store = MemoryArchiveStore::new();
+        let progress = RecordingProgress::default();
+        let scope = BackupScope {
+            containers: vec!["web".into()],
+            ..BackupScope::default()
+        };
+        run(&docker, &store, &progress, &request(scope)).unwrap();
+
+        let manifest = manifest(&store, "/backups/out");
+        assert_eq!(
+            manifest.images[0].platform,
+            Some(Platform::new("linux", "amd64"))
+        );
+        assert_eq!(
+            manifest.containers[0].platform,
+            Some(Platform::new("linux", "arm64"))
+        );
+    }
+
+    #[test]
+    fn backup_refuses_daemon_without_platform() {
+        let mut docker = FakeDocker::default().with_volume("v", b"V");
+        docker.info.arch = String::new();
+        let store = MemoryArchiveStore::new();
+        let progress = RecordingProgress::default();
+        let error = run(&docker, &store, &progress, &request(BackupScope::default())).unwrap_err();
+        assert_eq!(error.exit_code(), 3);
+        assert!(
+            docker
+                .calls
+                .borrow()
+                .iter()
+                .all(|c| !c.starts_with("export_"))
+        );
     }
 
     #[test]

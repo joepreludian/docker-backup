@@ -133,6 +133,9 @@ pub struct ImageEntry {
     pub size_bytes: u64,
     pub sha256: Sha256Digest,
     pub origin: ImageOrigin,
+    /// Platform the image was built for; absent in manifests written before 0.2.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<Platform>,
     #[serde(default)]
     pub inspect: Value,
 }
@@ -145,6 +148,9 @@ pub struct ContainerEntry {
     pub file: String,
     pub size_bytes: u64,
     pub sha256: Sha256Digest,
+    /// Platform the container's image was built for; absent in manifests written before 0.2.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<Platform>,
     #[serde(default)]
     pub inspect: Value,
 }
@@ -266,6 +272,22 @@ impl Manifest {
         });
         volumes.chain(images).chain(containers).collect()
     }
+
+    /// The image's own platform, or the backup daemon's platform for old manifests.
+    pub fn image_platform(&self, entry: &ImageEntry) -> Platform {
+        entry
+            .platform
+            .clone()
+            .unwrap_or_else(|| self.docker.platform())
+    }
+
+    /// The container's own platform, or the backup daemon's platform for old manifests.
+    pub fn container_platform(&self, entry: &ContainerEntry) -> Platform {
+        entry
+            .platform
+            .clone()
+            .unwrap_or_else(|| self.docker.platform())
+    }
 }
 
 /// The only directories a manifest may reference, in the order `files()` uses them.
@@ -346,6 +368,7 @@ mod tests {
             size_bytes: 5,
             sha256: Sha256Digest::of(b"image"),
             origin: ImageOrigin::Built,
+            platform: None,
             inspect: json!({}),
         });
         manifest.containers.push(ContainerEntry {
@@ -355,6 +378,7 @@ mod tests {
             file: "containers/web.tar".into(),
             size_bytes: 7,
             sha256: Sha256Digest::of(b"container"),
+            platform: None,
             inspect: json!({}),
         });
         manifest
@@ -490,6 +514,71 @@ mod tests {
         let error = unknown.require_platform().unwrap_err();
         assert_eq!(error.exit_code(), 3);
         assert!(error.to_string().contains("platform"));
+    }
+
+    #[test]
+    fn entry_platform_falls_back_to_daemon_platform() {
+        let docker = DockerInfo {
+            os: "linux".into(),
+            arch: "amd64".into(),
+            ..DockerInfo::default()
+        };
+        let mut m = Manifest::new(
+            datetime!(2026-09-20 00:00:00 UTC),
+            docker,
+            Compression::None,
+        );
+        m.images.push(ImageEntry {
+            reference: "a:1".into(),
+            id: "sha256:1".into(),
+            file: "images/a_1.tar".into(),
+            size_bytes: 1,
+            sha256: Sha256Digest::of(b"x"),
+            origin: ImageOrigin::Built,
+            platform: None,
+            inspect: json!({}),
+        });
+        m.images.push(ImageEntry {
+            reference: "b:1".into(),
+            id: "sha256:2".into(),
+            file: "images/b_1.tar".into(),
+            size_bytes: 1,
+            sha256: Sha256Digest::of(b"y"),
+            origin: ImageOrigin::Built,
+            platform: Some(Platform::new("linux", "arm64")),
+            inspect: json!({}),
+        });
+        assert_eq!(
+            m.image_platform(&m.images[0]),
+            Platform::new("linux", "amd64")
+        );
+        assert_eq!(
+            m.image_platform(&m.images[1]),
+            Platform::new("linux", "arm64")
+        );
+
+        let json = m.to_json().unwrap();
+        assert!(
+            !json.contains("\"platform\": null"),
+            "None must be omitted: {json}"
+        );
+        let back = Manifest::from_json(&json).unwrap();
+        assert_eq!(
+            back.images[1].platform,
+            Some(Platform::new("linux", "arm64"))
+        );
+    }
+
+    #[test]
+    fn manifests_without_platform_fields_still_load() {
+        // Existing fixture predates the platform field.
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/backup_corrupt/manifest.json"
+        ))
+        .unwrap();
+        let m = Manifest::from_json(&text).unwrap();
+        assert!(m.images.iter().all(|i| i.platform.is_none()));
     }
 
     #[test]

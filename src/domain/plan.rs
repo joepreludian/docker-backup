@@ -314,6 +314,7 @@ mod tests {
             size_bytes: 1,
             sha256: Sha256Digest::of(b"y"),
             origin: ImageOrigin::Built,
+            platform: None,
             inspect: json!({}),
         });
         m.containers.push(ContainerEntry {
@@ -323,6 +324,7 @@ mod tests {
             file: "containers/web.tar".into(),
             size_bytes: 1,
             sha256: Sha256Digest::of(b"z"),
+            platform: None,
             inspect: json!({}),
         });
         m

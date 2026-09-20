@@ -13,6 +13,7 @@ use crate::application::ports::{
 };
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::manifest::{Compression, DockerInfo, Sha256Digest, ToolInfo};
+use crate::domain::platform::Platform;
 use crate::domain::refs::{ContainerRef, ImageOrigin, ImageRef, ItemKind, VolumeRef};
 use crate::domain::report::ItemOutcome;
 
@@ -30,6 +31,7 @@ pub struct FakeDocker {
     pub volatile: HashSet<String>,
     pub images: Vec<(ImageRef, Vec<u8>)>,
     pub containers: Vec<(ContainerRef, Vec<u8>)>,
+    pub image_platforms: HashMap<String, Platform>,
     pub fail_on: HashSet<String>,
     pub calls: RefCell<Vec<String>>,
     pub loaded_images: RefCell<Vec<Vec<u8>>>,
@@ -52,6 +54,7 @@ impl Default for FakeDocker {
             volatile: HashSet::new(),
             images: Vec::new(),
             containers: Vec::new(),
+            image_platforms: HashMap::new(),
             fail_on: HashSet::new(),
             calls: RefCell::new(Vec::new()),
             loaded_images: RefCell::new(Vec::new()),
@@ -113,6 +116,11 @@ impl FakeDocker {
         self
     }
 
+    pub fn with_image_platform(mut self, tag: &str, platform: Platform) -> Self {
+        self.image_platforms.insert(tag.to_string(), platform);
+        self
+    }
+
     fn record(&self, call: String) {
         self.calls.borrow_mut().push(call);
     }
@@ -129,6 +137,17 @@ impl FakeDocker {
         self.images
             .iter()
             .find(|(i, _)| i.id == reference || i.tags.iter().any(|t| t == reference))
+    }
+
+    fn platform_of(&self, reference: &str) -> Platform {
+        let tagged = self.image(reference).and_then(|(image, _)| {
+            image
+                .tags
+                .iter()
+                .find_map(|t| self.image_platforms.get(t))
+                .cloned()
+        });
+        tagged.unwrap_or_else(|| self.info.platform())
     }
 }
 
@@ -170,7 +189,8 @@ impl DockerPort for FakeDocker {
     }
 
     fn inspect_image(&self, id: &str) -> AppResult<Value> {
-        Ok(json!({"Id": id}))
+        let p = self.platform_of(id);
+        Ok(json!({"Id": id, "Os": p.os, "Architecture": p.arch, "Variant": p.variant}))
     }
 
     fn list_containers(&self) -> AppResult<Vec<ContainerRef>> {
@@ -179,7 +199,17 @@ impl DockerPort for FakeDocker {
     }
 
     fn inspect_container(&self, name: &str) -> AppResult<Value> {
-        Ok(json!({"Name": format!("/{name}")}))
+        let image_id = self
+            .containers
+            .iter()
+            .find(|(c, _)| c.name == name)
+            .map(|(c, _)| {
+                self.image(&c.image)
+                    .map(|(image, _)| image.id.clone())
+                    .unwrap_or_else(|| c.image.clone())
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        Ok(json!({"Name": format!("/{name}"), "Image": image_id}))
     }
 
     fn ensure_helper_image(&self) -> AppResult<()> {

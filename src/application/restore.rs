@@ -215,6 +215,7 @@ mod tests {
             size_bytes: 8,
             sha256: Sha256Digest::of(b"APPIMAGE"),
             origin: ImageOrigin::Built,
+            platform: None,
             inspect: json!({}),
         });
         store.put("/b/containers/web.tar", b"WEBFS");
@@ -225,6 +226,7 @@ mod tests {
             file: "containers/web.tar".into(),
             size_bytes: 5,
             sha256: Sha256Digest::of(b"WEBFS"),
+            platform: None,
             inspect: json!({}),
         });
         store
