@@ -21,7 +21,7 @@ impl fmt::Display for ItemKind {
             ItemKind::Image => "IMAGE",
             ItemKind::Container => "CONTAINER",
         };
-        f.write_str(label)
+        f.pad(label)
     }
 }
 

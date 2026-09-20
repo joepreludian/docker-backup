@@ -16,11 +16,7 @@ pub fn format_progress_line(
     kind: ItemKind,
     name: &str,
 ) -> String {
-    let kind_str = format!("{}", kind);
-    format!(
-        "[ {} {}/{} ] {:<9} {} ...",
-        operation, index, total, kind_str, name
-    )
+    format!("[ {operation} {index}/{total} ] {kind:<9} {name} ...")
 }
 
 pub struct StderrProgress {

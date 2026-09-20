@@ -7,7 +7,7 @@
   "hash_algorithm": "sha256",
   "volumes": [
     { "name": "good", "file": "volumes/good.tar", "size_bytes": 6, "sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03", "volatile": false, "inspect": {} },
-    { "name": "bad", "file": "volumes/bad.tar", "size_bytes": 4, "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "volatile": false, "inspect": {} }
+    { "name": "bad", "file": "volumes/bad.tar", "size_bytes": 9, "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "volatile": false, "inspect": {} }
   ],
   "images": [],
   "containers": []

@@ -29,11 +29,26 @@ Anonymous ("volatile") volumes are skipped unless `--include-volatile` is given,
 on both backup and restore. Containers are only exported when named with
 `--containers`; repeat the flag or pass a comma-separated list
 (`--containers web --containers db` or `--containers web,db`). Restoring one
-imports it as an image `<name>:restored`.
+imports it as an image `<name>:restored`, with the name lowercased because
+docker rejects uppercase in an image reference.
+
+`backup` refuses to write where a backup already lives: an output folder that
+already holds a `manifest.json` (or a partial one), or an existing
+`<output>.tar.bz2` for `--single-archive`, is an error (exit 2) instead of an
+overwrite.
 
 `restore` verifies every file's recorded SHA-256 hash before touching docker at
 all, unless `--skip-verify` is given; if verification fails, nothing is
 restored.
+
+If a volume's import fails part-way, the volume can be left half-restored: it
+has already been created (and, with `--overwrite`, emptied) before the data is
+streamed in, so re-run the restore with `--overwrite` to refill it from the
+backup.
+
+A `.tar.bz2` backup is unpacked into a temp directory next to the archive, so
+restoring or inspecting one needs roughly twice the archive's size free on that
+filesystem.
 
 **Warning:** `--overwrite` wipes and refills the contents of **every** volume
 in the manifest that already exists on the host, not just one you care about.
@@ -63,4 +78,4 @@ Manual restore of a volume without this tool:
 ## Development
 
     cargo test                                                   # unit + CLI tests
-    DOCKER_BACKUP_IT=1 cargo test --test docker_integration -- --ignored   # real daemon
+    DOCKER_BACKUP_IT=1 cargo test --test docker_integration -- --ignored --test-threads=1   # real daemon

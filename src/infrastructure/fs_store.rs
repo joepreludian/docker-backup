@@ -223,8 +223,16 @@ impl ArchiveStore for FsArchiveStore {
 
     fn write_text(&self, path: &Path, contents: &str) -> AppResult<()> {
         let tmp = temp_path(path);
-        fs::write(&tmp, contents)?;
-        fs::rename(&tmp, path)?;
+        let written = (|| -> io::Result<()> {
+            let mut file = File::create(&tmp)?;
+            file.write_all(contents.as_bytes())?;
+            file.sync_all()
+        })()
+        .and_then(|()| fs::rename(&tmp, path));
+        if let Err(error) = written {
+            let _ = fs::remove_file(&tmp);
+            return Err(error.into());
+        }
         Ok(())
     }
 
@@ -316,7 +324,7 @@ impl ArchiveStore for FsArchiveStore {
         let parent = parent.display().to_string();
         let archive = archive.display().to_string();
         let name = name.to_string_lossy().into_owned();
-        self.run_tar(&["-cjf", &archive, "-C", &parent, &name])
+        self.run_tar(&["-cjf", &archive, "-C", &parent, "--", &name])
     }
 
     fn unpack_archive(&self, archive: &Path, into: &Path) -> AppResult<()> {
@@ -511,6 +519,7 @@ mod tests {
         store.create_dir_all(path.parent().unwrap()).unwrap();
         store.write_text(&path, "{}").unwrap();
         assert!(store.exists(&path));
+        assert!(!temp_path(&path).exists(), "write_text left a .tmp behind");
         assert_eq!(store.read_text(&path).unwrap(), "{}");
         store.remove_file(&path).unwrap();
         assert!(!store.exists(&path));

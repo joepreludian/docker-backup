@@ -11,8 +11,8 @@ use crate::application::ports::{
 };
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::manifest::{
-    CONTAINERS_DIR, Compression, ContainerEntry, IMAGES_DIR, ImageEntry, MANIFEST_FILE, Manifest,
-    PARTIAL_MANIFEST_FILE, VOLUMES_DIR, VolumeEntry,
+    CONTAINERS_DIR, Compression, ContainerEntry, DockerInfo, IMAGES_DIR, ImageEntry, MANIFEST_FILE,
+    Manifest, PARTIAL_MANIFEST_FILE, VOLUMES_DIR, VolumeEntry,
 };
 use crate::domain::naming::{FileNamer, archive_path, image_base_name, sanitize};
 use crate::domain::plan::{BackupPlan, BackupScope};
@@ -36,12 +36,10 @@ pub struct BackupService<'a> {
 
 impl BackupService<'_> {
     pub fn run(&self, request: &BackupRequest) -> AppResult<BackupReport> {
-        let docker_info = self
-            .docker
-            .engine_info()
-            .map_err(|e| AppError::DockerUnavailable(e.to_string()))?;
+        let docker_info = self.docker.engine_info()?;
         let inventory = collect_inventory(self.docker)?;
         let plan = BackupPlan::build(&inventory, &request.scope)?;
+        self.check_output_is_free(request)?;
 
         let output = request.output.clone();
         let parent = output
@@ -62,6 +60,45 @@ impl BackupService<'_> {
             Some(temp) => temp.join(&folder_name),
             None => output.clone(),
         };
+        let result = self.run_in(&work_dir, &plan, &docker_info, request);
+        if let Some(temp) = &temp_root {
+            // On success the archive is already packed; either way the scratch dir goes.
+            let _ = self.store.remove_dir_all(temp);
+        }
+        result
+    }
+
+    /// Refuse to write where a backup already lives, rather than mixing two of them.
+    fn check_output_is_free(&self, request: &BackupRequest) -> AppResult<()> {
+        let taken = if request.single_archive {
+            let archive = archive_path(&request.output);
+            self.store.exists(&archive).then_some(archive)
+        } else if [MANIFEST_FILE, PARTIAL_MANIFEST_FILE]
+            .iter()
+            .any(|name| self.store.exists(&request.output.join(name)))
+        {
+            Some(request.output.clone())
+        } else {
+            None
+        };
+        match taken {
+            Some(path) => Err(AppError::Conflict(format!(
+                "{} already contains a backup; choose another output",
+                path.display()
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Everything inside the work directory: create it, export every planned item,
+    /// write the manifest and, for `--single-archive`, pack the result.
+    fn run_in(
+        &self,
+        work_dir: &Path,
+        plan: &BackupPlan,
+        docker_info: &DockerInfo,
+        request: &BackupRequest,
+    ) -> AppResult<BackupReport> {
         for dir in [VOLUMES_DIR, IMAGES_DIR, CONTAINERS_DIR] {
             self.store.create_dir_all(&work_dir.join(dir))?;
         }
@@ -87,7 +124,7 @@ impl BackupService<'_> {
                 namer.unique(&sanitize(&volume.name), extension)
             );
             let result = self.export(
-                &work_dir,
+                work_dir,
                 &file,
                 request.compression,
                 ItemKind::Volume,
@@ -107,7 +144,7 @@ impl BackupService<'_> {
                 });
             }
             items.push(self.finish_item(
-                &work_dir,
+                work_dir,
                 &manifest,
                 ItemKind::Volume,
                 &volume.name,
@@ -125,7 +162,7 @@ impl BackupService<'_> {
                 namer.unique(&image_base_name(image), extension)
             );
             let result = self.export(
-                &work_dir,
+                work_dir,
                 &file,
                 request.compression,
                 ItemKind::Image,
@@ -146,7 +183,7 @@ impl BackupService<'_> {
                 });
             }
             items.push(self.finish_item(
-                &work_dir,
+                work_dir,
                 &manifest,
                 ItemKind::Image,
                 &reference,
@@ -163,7 +200,7 @@ impl BackupService<'_> {
                 namer.unique(&sanitize(&container.name), extension)
             );
             let result = self.export(
-                &work_dir,
+                work_dir,
                 &file,
                 request.compression,
                 ItemKind::Container,
@@ -184,7 +221,7 @@ impl BackupService<'_> {
                 });
             }
             items.push(self.finish_item(
-                &work_dir,
+                work_dir,
                 &manifest,
                 ItemKind::Container,
                 &container.name,
@@ -200,17 +237,12 @@ impl BackupService<'_> {
             self.store.remove_file(&partial)?;
         }
 
-        let final_output = match temp_root {
-            Some(temp) => {
-                let archive = archive_path(&output);
-                if let Err(error) = self.store.pack_folder(&work_dir, &archive) {
-                    let _ = self.store.remove_dir_all(&temp);
-                    return Err(error);
-                }
-                self.store.remove_dir_all(&temp)?;
-                archive
-            }
-            None => output,
+        let final_output = if request.single_archive {
+            let archive = archive_path(&request.output);
+            self.store.pack_folder(work_dir, &archive)?;
+            archive
+        } else {
+            request.output.clone()
         };
         self.progress.finish();
 
@@ -218,7 +250,7 @@ impl BackupService<'_> {
             output: final_output,
             single_archive: request.single_archive,
             compression: request.compression,
-            docker: docker_info,
+            docker: docker_info.clone(),
             items,
         })
     }
@@ -443,6 +475,7 @@ mod tests {
         );
         let err = run(&docker, &store, &progress, &request(BackupScope::default())).unwrap_err();
         assert_eq!(err.exit_code(), 3);
+        assert_eq!(err.to_string(), "docker is not available: fake daemon down");
         assert!(store.files.borrow().is_empty());
     }
 
@@ -522,6 +555,61 @@ mod tests {
                 .is_empty()
         );
         assert!(!store.exists(Path::new("/backups/out.tar.bz2")));
+    }
+
+    #[test]
+    fn an_early_failure_removes_the_single_archive_temp_dir() {
+        let (docker, store, progress) = (
+            docker().failing("ensure_helper_image"),
+            MemoryArchiveStore::new(),
+            RecordingProgress::default(),
+        );
+        let mut req = request(BackupScope::default());
+        req.single_archive = true;
+        let err = run(&docker, &store, &progress, &req).unwrap_err();
+        assert!(matches!(err, AppError::DockerCommandFailed { .. }));
+        let temp = Path::new("/backups/.docker-backup-tmp-1");
+        assert!(store.paths_under(temp).is_empty());
+        assert!(!store.exists(temp));
+    }
+
+    #[test]
+    fn refuses_to_overwrite_an_existing_backup_folder() {
+        for existing in [MANIFEST_FILE, PARTIAL_MANIFEST_FILE] {
+            let (docker, store, progress) = (
+                docker(),
+                MemoryArchiveStore::new(),
+                RecordingProgress::default(),
+            );
+            store.put(Path::new("/backups/out").join(existing), b"{}");
+            let err =
+                run(&docker, &store, &progress, &request(BackupScope::default())).unwrap_err();
+            assert_eq!(err.exit_code(), 2);
+            assert!(
+                err.to_string().contains("already contains a backup"),
+                "message was {err}"
+            );
+            assert!(!store.exists(Path::new("/backups/out/volumes/pgdata.tar")));
+        }
+    }
+
+    #[test]
+    fn refuses_to_overwrite_an_existing_archive() {
+        let (docker, store, progress) = (
+            docker(),
+            MemoryArchiveStore::new(),
+            RecordingProgress::default(),
+        );
+        store.put("/backups/out.tar.bz2", b"OLD");
+        let mut req = request(BackupScope::default());
+        req.single_archive = true;
+        let err = run(&docker, &store, &progress, &req).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.to_string().contains("already contains a backup"),
+            "message was {err}"
+        );
+        assert_eq!(store.file("/backups/out.tar.bz2").unwrap(), b"OLD");
     }
 
     #[test]

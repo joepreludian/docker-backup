@@ -184,6 +184,7 @@ impl DockerPort for FakeDocker {
 
     fn ensure_helper_image(&self) -> AppResult<()> {
         self.record("ensure_helper_image".into());
+        self.check("ensure_helper_image")?;
         Ok(())
     }
 

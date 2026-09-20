@@ -43,9 +43,7 @@ impl RestoreService<'_> {
             }
         }
 
-        self.docker
-            .engine_info()
-            .map_err(|e| AppError::DockerUnavailable(e.to_string()))?;
+        self.docker.engine_info()?;
         let existing: Vec<String> = self
             .docker
             .list_volumes()?
@@ -115,7 +113,12 @@ impl RestoreService<'_> {
             index += 1;
             self.progress
                 .item_started(ItemKind::Container, &container.name, index);
-            let tag = format!("{}:{}", container.name, request.policy.container_tag);
+            // Docker rejects uppercase in an image name, container names allow it.
+            let tag = format!(
+                "{}:{}",
+                container.name.to_ascii_lowercase(),
+                request.policy.container_tag
+            );
             let outcome = to_outcome(
                 self.store
                     .open_item(&root.join(&container.file), compression)
@@ -424,6 +427,28 @@ mod tests {
     }
 
     #[test]
+    fn container_tag_is_lowercased_for_docker() {
+        let store = MemoryArchiveStore::new();
+        let mut manifest = seed(&store);
+        manifest.containers[0].name = "WebApp".into();
+        store
+            .write_text(
+                &Path::new("/b").join(MANIFEST_FILE),
+                &manifest.to_json().unwrap(),
+            )
+            .unwrap();
+        let (docker, progress) = (FakeDocker::default(), RecordingProgress::default());
+        let policy = RestorePolicy {
+            volumes: false,
+            images: false,
+            ..RestorePolicy::default()
+        };
+        let report = run(&docker, &store, &progress, &request(policy)).unwrap();
+        assert_eq!(report.items[0].name, "WebApp");
+        assert_eq!(docker.imported_containers.borrow()[0].0, "webapp:restored");
+    }
+
+    #[test]
     fn archive_source_is_unpacked_and_cleaned_up() {
         let store = MemoryArchiveStore::new();
         seed(&store);
@@ -456,5 +481,6 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.exit_code(), 3);
+        assert_eq!(err.to_string(), "docker is not available: fake daemon down");
     }
 }

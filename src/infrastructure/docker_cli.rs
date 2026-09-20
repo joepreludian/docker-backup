@@ -136,15 +136,22 @@ impl DockerCli {
         let stderr = child.stderr.take().expect("piped stderr");
         let stderr_reader = thread::spawn(move || read_all(stderr));
         let copied = io::copy(&mut stdout, sink);
+        // Close our end of the pipe before waiting: a child still writing into a
+        // full pipe nobody reads would never exit.
+        drop(stdout);
+        if copied.is_err() {
+            let _ = child.kill();
+        }
         let status = child.wait()?;
         let stderr_text = stderr_reader.join().expect("stderr thread panicked");
+        // Our own write failure explains the (now expected) non-zero exit.
+        copied?;
         if !status.success() {
             return Err(AppError::DockerCommandFailed {
                 command: self.describe(&args),
                 stderr: stderr_text,
             });
         }
-        copied?;
         Ok(())
     }
 
@@ -161,16 +168,26 @@ impl DockerCli {
         let stderr = child.stderr.take().expect("piped stderr");
         let stderr_reader = thread::spawn(move || read_all(stderr));
         let copied = io::copy(source, &mut stdin);
+        // Close the pipe before waiting; kill the child when we cannot feed it any more.
         drop(stdin);
+        if copied.is_err() {
+            let _ = child.kill();
+        }
         let status = child.wait()?;
         let stderr_text = stderr_reader.join().expect("stderr thread panicked");
-        if !status.success() {
-            return Err(AppError::DockerCommandFailed {
-                command: self.describe(&args),
-                stderr: stderr_text,
-            });
+        let child_failed = !status.success();
+        let failure = || AppError::DockerCommandFailed {
+            command: self.describe(&args),
+            stderr: stderr_text.clone(),
+        };
+        // A child that failed on its own says why; otherwise our copy error is the cause.
+        if child_failed && !stderr_text.is_empty() {
+            return Err(failure());
         }
         copied?;
+        if child_failed {
+            return Err(failure());
+        }
         Ok(())
     }
 
@@ -496,6 +513,85 @@ mod tests {
             unique_ids("sha256:a\nsha256:b\nsha256:a\n\n"),
             vec!["sha256:a", "sha256:b"]
         );
+    }
+
+    /// A throwaway executable script standing in for the `docker` binary.
+    #[cfg(unix)]
+    fn fake_docker(body: &str) -> tempfile::TempPath {
+        use std::os::unix::fs::PermissionsExt;
+        let mut file = tempfile::Builder::new()
+            .prefix("fake-docker-")
+            .suffix(".sh")
+            .tempfile()
+            .expect("temp script");
+        writeln!(file, "#!/bin/sh\n{body}").expect("write script");
+        file.flush().expect("flush script");
+        let path = file.into_temp_path();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    #[cfg(unix)]
+    struct FailingSink {
+        seen: usize,
+    }
+
+    #[cfg(unix)]
+    impl Write for FailingSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.seen += 1;
+            if self.seen >= 2 {
+                return Err(io::Error::other("disk full"));
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_sink_aborts_the_stream_instead_of_hanging() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let script = fake_docker("head -c 10000000 /dev/zero");
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let cli = DockerCli::with_binary(
+                script.to_string_lossy().into_owned(),
+                None,
+                "alpine:3".into(),
+            );
+            let mut sink = FailingSink { seen: 0 };
+            let failed = cli.save_image("x", &mut sink).is_err();
+            let _ = sender.send(failed);
+            drop(script);
+        });
+        match receiver.recv_timeout(Duration::from_secs(15)) {
+            Ok(failed) => assert!(failed, "a sink error must surface as an error"),
+            Err(_) => panic!("save_image hung after the sink failed"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_zero_exit_reports_the_command_stderr() {
+        let script = fake_docker("echo 'no such image: x' >&2; exit 1");
+        let cli = DockerCli::with_binary(
+            script.to_string_lossy().into_owned(),
+            None,
+            "alpine:3".into(),
+        );
+        let err = cli.save_image("x", &mut Vec::new()).unwrap_err();
+        match err {
+            AppError::DockerCommandFailed { stderr, .. } => {
+                assert!(stderr.contains("no such image: x"), "stderr was {stderr:?}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

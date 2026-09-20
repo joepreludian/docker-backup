@@ -24,7 +24,7 @@
 //! compress every volume on the host (per-file or as one combined archive)
 //! and can be slow / large on a host with many or large volumes.
 //!
-//! Run with: DOCKER_BACKUP_IT=1 cargo test --test docker_integration -- --ignored
+//! Run with: DOCKER_BACKUP_IT=1 cargo test --test docker_integration -- --ignored --test-threads=1
 
 use std::fs;
 use std::path::{Path, PathBuf};

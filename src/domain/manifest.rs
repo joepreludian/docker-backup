@@ -1,6 +1,7 @@
 //! The `manifest.json` model: everything a sysadmin needs to restore by hand.
 
 use std::fmt;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -194,7 +195,25 @@ impl Manifest {
                 manifest.hash_algorithm
             )));
         }
+        manifest.validate()?;
         Ok(manifest)
+    }
+
+    /// Reject anything a hostile manifest could use to write outside the backup
+    /// folder or to name a docker object we would then hand to the CLI.
+    pub fn validate(&self) -> AppResult<()> {
+        for volume in &self.volumes {
+            check_docker_name("volume", &volume.name)?;
+            check_file("volume", &volume.name, &volume.file)?;
+        }
+        for image in &self.images {
+            check_file("image", &image.reference, &image.file)?;
+        }
+        for container in &self.containers {
+            check_docker_name("container", &container.name)?;
+            check_file("container", &container.name, &container.file)?;
+        }
+        Ok(())
     }
 
     pub fn item_count(&self) -> usize {
@@ -229,6 +248,50 @@ impl Manifest {
         });
         volumes.chain(images).chain(containers).collect()
     }
+}
+
+/// The only directories a manifest may reference, in the order `files()` uses them.
+const ITEM_DIRS: [&str; 3] = [VOLUMES_DIR, IMAGES_DIR, CONTAINERS_DIR];
+
+/// Docker's own rule for volume and container names: `^[A-Za-z0-9][A-Za-z0-9_.-]*$`.
+fn is_docker_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let starts_well = bytes.next().is_some_and(|b| b.is_ascii_alphanumeric());
+    starts_well && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+/// `Ok` only for `volumes/…`, `images/…` or `containers/…` relative paths with
+/// no `..`, no root and no prefix component.
+fn check_relative_item_path(file: &str) -> Result<(), &'static str> {
+    let components: Vec<Component<'_>> = Path::new(file).components().collect();
+    let Some(Component::Normal(first)) = components.first() else {
+        return Err("is not a relative path");
+    };
+    if !ITEM_DIRS.contains(&&*first.to_string_lossy()) {
+        return Err("is not inside volumes/, images/ or containers/");
+    }
+    if components.len() < 2 {
+        return Err("does not name a file");
+    }
+    if !components.iter().all(|c| matches!(c, Component::Normal(_))) {
+        return Err("escapes the backup folder");
+    }
+    Ok(())
+}
+
+fn check_docker_name(kind: &str, name: &str) -> AppResult<()> {
+    if is_docker_name(name) {
+        Ok(())
+    } else {
+        Err(AppError::ManifestInvalid(format!(
+            "{kind} name {name:?} is not a valid docker name"
+        )))
+    }
+}
+
+fn check_file(kind: &str, name: &str, file: &str) -> AppResult<()> {
+    check_relative_item_path(file)
+        .map_err(|why| AppError::ManifestInvalid(format!("{kind} {name:?}: file {file:?} {why}")))
 }
 
 #[cfg(test)]
@@ -356,6 +419,43 @@ mod tests {
             Manifest::from_json("{}"),
             Err(AppError::ManifestInvalid(_))
         ));
+    }
+
+    fn parsed_with(mutate: impl FnOnce(&mut Value)) -> AppResult<Manifest> {
+        let mut value: Value = serde_json::from_str(&sample().to_json().unwrap()).unwrap();
+        mutate(&mut value);
+        Manifest::from_json(&value.to_string())
+    }
+
+    #[test]
+    fn rejects_absolute_file_paths() {
+        let err = parsed_with(|v| v["volumes"][0]["file"] = json!("/etc/passwd")).unwrap_err();
+        assert!(matches!(err, AppError::ManifestInvalid(msg) if msg.contains("/etc/passwd")));
+    }
+
+    #[test]
+    fn rejects_parent_directory_traversal() {
+        let err = parsed_with(|v| v["volumes"][0]["file"] = json!("volumes/../../etc/passwd"))
+            .unwrap_err();
+        assert!(matches!(err, AppError::ManifestInvalid(msg) if msg.contains("pgdata")));
+    }
+
+    #[test]
+    fn rejects_files_outside_the_backup_directories() {
+        let err = parsed_with(|v| v["images"][0]["file"] = json!("elsewhere/app.tar")).unwrap_err();
+        assert!(matches!(err, AppError::ManifestInvalid(msg) if msg.contains("elsewhere/app.tar")));
+    }
+
+    #[test]
+    fn rejects_hostile_volume_names() {
+        let err = parsed_with(|v| v["volumes"][0]["name"] = json!("/")).unwrap_err();
+        assert!(matches!(err, AppError::ManifestInvalid(msg) if msg.contains("volume")));
+    }
+
+    #[test]
+    fn rejects_container_names_with_spaces() {
+        let err = parsed_with(|v| v["containers"][0]["name"] = json!("web app")).unwrap_err();
+        assert!(matches!(err, AppError::ManifestInvalid(msg) if msg.contains("web app")));
     }
 
     #[test]
