@@ -2,6 +2,7 @@ pub mod error;
 pub mod manifest;
 pub mod naming;
 pub mod plan;
+pub mod platform;
 pub mod refs;
 pub mod report;
 pub mod verification;

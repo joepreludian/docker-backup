@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::domain::error::{AppError, AppResult};
+use crate::domain::platform::Platform;
 use crate::domain::refs::{ImageOrigin, ItemKind};
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -87,6 +88,23 @@ pub struct DockerInfo {
     pub context: String,
     pub os: String,
     pub arch: String,
+}
+
+impl DockerInfo {
+    pub fn platform(&self) -> Platform {
+        Platform::new(self.os.clone(), self.arch.clone())
+    }
+
+    /// Backup and restore refuse to run against a daemon whose platform is unknown.
+    pub fn require_platform(&self) -> AppResult<()> {
+        if self.platform().is_known() {
+            Ok(())
+        } else {
+            Err(AppError::DockerUnavailable(
+                "docker daemon did not report its platform (os/arch)".into(),
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +474,22 @@ mod tests {
     fn rejects_container_names_with_spaces() {
         let err = parsed_with(|v| v["containers"][0]["name"] = json!("web app")).unwrap_err();
         assert!(matches!(err, AppError::ManifestInvalid(msg) if msg.contains("web app")));
+    }
+
+    #[test]
+    fn docker_info_platform_and_validation() {
+        let info = DockerInfo {
+            os: "linux".into(),
+            arch: "arm64".into(),
+            ..DockerInfo::default()
+        };
+        assert_eq!(info.platform(), Platform::new("linux", "arm64"));
+        assert!(info.require_platform().is_ok());
+
+        let unknown = DockerInfo::default();
+        let error = unknown.require_platform().unwrap_err();
+        assert_eq!(error.exit_code(), 3);
+        assert!(error.to_string().contains("platform"));
     }
 
     #[test]
