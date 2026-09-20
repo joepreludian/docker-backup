@@ -4,3 +4,4 @@
 *.tar
 *.tar.bz2
 !tests/fixtures/**
+/.superpowers/
