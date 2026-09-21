@@ -15,9 +15,10 @@ Requires `docker`, `tar`, and (for bzip2 options) `bzip2` on PATH.
     docker-backup doctor                                   # daemon, counts, required tools
     docker-backup backup ./my-backup --per-file-bzip2      # named volumes + built images
     docker-backup info ./my-backup                         # manifest + hash check
-    docker-backup restore ./my-backup                      # skips volumes that already exist
+    docker-backup restore ./my-backup                      # shows a preview, asks to confirm
     docker-backup restore ./my-backup --overwrite          # wipes and refills every listed volume
     docker-backup --json doctor | jq .                     # machine-readable output
+    docker-backup --json restore ./my-backup --yes         # non-interactive, --json requires --yes
 
 ## Usage
 
@@ -26,7 +27,7 @@ Requires `docker`, `tar`, and (for bzip2 options) `bzip2` on PATH.
                          [--no-images] [--no-volumes]
     docker-backup restore <BACKUP_DIR | archive.tar.bz2> [--overwrite] [--include-volatile]
                          [--container-tag TAG] [--no-images] [--no-volumes] [--no-containers]
-                         [--skip-verify]
+                         [--skip-verify] [--yes | -y] [--force-import-if-arch-mismatch]
     docker-backup info    <BACKUP_DIR | archive.tar.bz2>
     docker-backup doctor
 
@@ -49,6 +50,18 @@ overwrite.
 `restore` verifies every file's recorded SHA-256 hash before touching docker at
 all, unless `--skip-verify` is given; if verification fails, nothing is
 restored.
+
+Before changing anything, `restore` prints a preview of what it will do and asks
+`Proceed? [y/N]`. If the backup was made on a different os/arch than the target
+daemon, it also prints an architecture-mismatch warning and asks
+`Are you sure? [y/N]`. Pass `--yes` (or `-y`) to answer both prompts
+automatically. Without `--yes`, running with stdin that isn't a terminal
+(a script, a pipe, or `--json`) aborts with exit code 2 asking for `--yes`, so
+`--json` always requires `--yes`.
+
+Images and container filesystems built for a different os/arch than the target
+daemon are skipped rather than imported, and reported as failures (exit 1).
+Pass `--force-import-if-arch-mismatch` to import them anyway.
 
 If a volume's import fails part-way, the volume can be left half-restored: it
 has already been created (and, with `--overwrite`, emptied) before the data is
@@ -74,6 +87,8 @@ is emptied and reloaded from the archive. Double-check what a backup contains
     <dir>/containers/<name>.tar[.bz2]
 
 Every file has its SHA-256 recorded in the manifest; `info` and `restore` verify them.
+The manifest also records the backing daemon's os/arch and each image's platform, which
+`restore` uses to detect an architecture mismatch against the target daemon.
 
 Manual restore of a volume without this tool:
 
@@ -82,7 +97,7 @@ Manual restore of a volume without this tool:
 
 ## Exit codes
 
-0 ok · 1 per-item failures or verification failed · 2 usage error · 3 docker unavailable
+0 ok · 1 per-item failures or verification failed · 2 usage error or restore aborted at a prompt · 3 docker unavailable
 
 ## Development
 

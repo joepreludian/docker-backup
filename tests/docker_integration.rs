@@ -211,7 +211,7 @@ fn run_roundtrip(extra_backup_args: &[&str]) {
 
     volume.remove();
 
-    let items = restore_json(&out, &["--json", "restore"]);
+    let items = restore_json(&out, &["--json", "restore", "--yes"]);
     assert_eq!(
         items.len(),
         1,
@@ -232,14 +232,14 @@ fn run_roundtrip(extra_backup_args: &[&str]) {
         "-c",
         "printf changed > /data/hello.txt",
     ]);
-    let items = restore_json(&out, &["--json", "restore"]);
+    let items = restore_json(&out, &["--json", "restore", "--yes"]);
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["status"], "skipped_existing");
     assert_eq!(items[0]["name"], volume.0);
     assert_eq!(volume.read(), "changed");
 
     // With --overwrite it must replace it.
-    let items = restore_json(&out, &["--json", "restore", "--overwrite"]);
+    let items = restore_json(&out, &["--json", "restore", "--overwrite", "--yes"]);
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["status"], "restored");
     assert_eq!(items[0]["name"], volume.0);
@@ -297,7 +297,7 @@ fn volume_roundtrip_single_archive() {
     // SAFETY: never pass --overwrite against a host-wide archive. Without it,
     // restore only ever creates volumes that don't already exist (our own)
     // and skips every volume that does.
-    let items = restore_json(&archive, &["--json", "restore"]);
+    let items = restore_json(&archive, &["--json", "restore", "--yes"]);
 
     let mut restored = 0;
     for item in &items {

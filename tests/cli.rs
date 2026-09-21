@@ -23,6 +23,14 @@ fn help_lists_all_commands() {
 }
 
 #[test]
+fn restore_help_lists_confirmation_flags() {
+    bin().args(["restore", "--help"]).assert().success().stdout(
+        predicate::str::contains("--yes")
+            .and(predicate::str::contains("--force-import-if-arch-mismatch")),
+    );
+}
+
+#[test]
 fn conflicting_compression_flags_are_a_usage_error() {
     bin()
         .args(["backup", "--per-file-bzip2", "--single-archive"])

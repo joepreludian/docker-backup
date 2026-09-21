@@ -104,6 +104,12 @@ pub struct RestoreArgs {
     /// Do not verify file hashes before restoring.
     #[arg(long)]
     pub skip_verify: bool,
+    /// Answer yes to the confirmation prompts (required for --json and non-interactive use).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+    /// Import images and container filesystems even when they were built for another os/arch.
+    #[arg(long)]
+    pub force_import_if_arch_mismatch: bool,
 }
 
 #[derive(Debug, Args)]
@@ -156,8 +162,7 @@ impl RestoreArgs {
                 images: !self.no_images,
                 containers: !self.no_containers,
                 container_tag: self.container_tag.clone(),
-                // Task 7 adds the `--force-import-if-arch-mismatch` flag.
-                force_arch_mismatch: false,
+                force_arch_mismatch: self.force_import_if_arch_mismatch,
             },
             verify: !self.skip_verify,
         }
@@ -275,6 +280,38 @@ mod tests {
         assert_eq!(request.policy.container_tag, "x");
         assert!(!request.verify);
         assert_eq!(request.source, PathBuf::from("/b"));
+    }
+
+    #[test]
+    fn restore_yes_and_force_arch_mismatch_flags() {
+        let cli = Cli::try_parse_from([
+            "docker-backup",
+            "restore",
+            "b",
+            "--yes",
+            "--force-import-if-arch-mismatch",
+        ])
+        .unwrap();
+        let Command::Restore(args) = cli.command else {
+            panic!("expected restore")
+        };
+        assert!(args.yes);
+        let request = args.to_request();
+        assert!(request.policy.force_arch_mismatch);
+
+        let cli = Cli::try_parse_from(["docker-backup", "restore", "b", "-y"]).unwrap();
+        let Command::Restore(args) = cli.command else {
+            panic!("expected restore")
+        };
+        assert!(args.yes);
+
+        let cli = Cli::try_parse_from(["docker-backup", "restore", "b"]).unwrap();
+        let Command::Restore(args) = cli.command else {
+            panic!("expected restore")
+        };
+        assert!(!args.yes);
+        let request = args.to_request();
+        assert!(!request.policy.force_arch_mismatch);
     }
 
     #[test]
