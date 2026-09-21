@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::application::ports::{ArchiveStore, DockerPort, Operation, ProgressSink};
+use crate::application::ports::{ArchiveStore, ConfirmPort, DockerPort, Operation, ProgressSink};
 use crate::application::verify::{locate_backup, read_manifest, verify_files};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::manifest::Compression;
@@ -21,6 +21,7 @@ pub struct RestoreService<'a> {
     pub docker: &'a dyn DockerPort,
     pub store: &'a dyn ArchiveStore,
     pub progress: &'a dyn ProgressSink,
+    pub confirm: &'a dyn ConfirmPort,
 }
 
 impl RestoreService<'_> {
@@ -43,7 +44,10 @@ impl RestoreService<'_> {
             }
         }
 
-        let target = self.docker.engine_info()?.platform();
+        let info = self.docker.engine_info()?;
+        info.require_platform()?;
+        let target = info.platform();
+
         let existing: Vec<String> = self
             .docker
             .list_volumes()?
@@ -51,6 +55,13 @@ impl RestoreService<'_> {
             .map(|v| v.name)
             .collect();
         let plan = RestorePlan::build(&manifest, &existing, &request.policy, &target);
+        let preview = plan.preview(&manifest, &request.source, &request.policy);
+
+        self.confirm.confirm_restore(&preview)?;
+        if !preview.mismatches.is_empty() {
+            self.confirm.confirm_arch_mismatch(&preview)?;
+        }
+
         if plan
             .volumes
             .iter()
@@ -92,17 +103,21 @@ impl RestoreService<'_> {
             });
         }
 
-        // Task 5 wires the skip: every planned image is restored for now,
-        // regardless of `image.action`.
         for image in &plan.images {
             index += 1;
             self.progress
                 .item_started(ItemKind::Image, &image.entry.reference, index);
-            let outcome = to_outcome(
-                self.store
-                    .open_item(&root.join(&image.entry.file), compression)
-                    .and_then(|mut reader| self.docker.load_image(&mut reader)),
-            );
+            let outcome = match image.action {
+                RestoreAction::SkipArchMismatch => ItemOutcome::SkippedArchMismatch {
+                    platform: image.platform.to_string(),
+                    target: target.to_string(),
+                },
+                _ => to_outcome(
+                    self.store
+                        .open_item(&root.join(&image.entry.file), compression)
+                        .and_then(|mut reader| self.docker.load_image(&mut reader)),
+                ),
+            };
             self.progress
                 .item_finished(ItemKind::Image, &image.entry.reference, &outcome);
             items.push(ItemResult {
@@ -113,8 +128,6 @@ impl RestoreService<'_> {
             });
         }
 
-        // Task 5 wires the skip: every planned container is restored for now,
-        // regardless of `container.action`.
         for container in &plan.containers {
             index += 1;
             self.progress
@@ -125,11 +138,17 @@ impl RestoreService<'_> {
                 container.entry.name.to_ascii_lowercase(),
                 request.policy.container_tag
             );
-            let outcome = to_outcome(
-                self.store
-                    .open_item(&root.join(&container.entry.file), compression)
-                    .and_then(|mut reader| self.docker.import_container_fs(&mut reader, &tag)),
-            );
+            let outcome = match container.action {
+                RestoreAction::SkipArchMismatch => ItemOutcome::SkippedArchMismatch {
+                    platform: container.platform.to_string(),
+                    target: target.to_string(),
+                },
+                _ => to_outcome(
+                    self.store
+                        .open_item(&root.join(&container.entry.file), compression)
+                        .and_then(|mut reader| self.docker.import_container_fs(&mut reader, &tag)),
+                ),
+            };
             self.progress
                 .item_finished(ItemKind::Container, &container.entry.name, &outcome);
             items.push(ItemResult {
@@ -143,7 +162,7 @@ impl RestoreService<'_> {
         self.progress.finish();
         Ok(RestoreReport {
             source: request.source.clone(),
-            preview: None,
+            preview: Some(preview),
             items,
         })
     }
@@ -181,11 +200,14 @@ fn to_outcome(result: AppResult<()>) -> ItemOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::fakes::{FakeDocker, MemoryArchiveStore, RecordingProgress};
+    use crate::application::fakes::{
+        FakeConfirm, FakeDocker, MemoryArchiveStore, RecordingProgress,
+    };
     use crate::domain::manifest::{
         Compression, ContainerEntry, DockerInfo, ImageEntry, MANIFEST_FILE, Manifest, Sha256Digest,
         VolumeEntry,
     };
+    use crate::domain::platform::Platform;
     use crate::domain::refs::ImageOrigin;
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -195,7 +217,11 @@ mod tests {
     fn seed(store: &MemoryArchiveStore) -> Manifest {
         let mut m = Manifest::new(
             datetime!(2026-09-19 00:00:00 UTC),
-            DockerInfo::default(),
+            DockerInfo {
+                os: "linux".into(),
+                arch: "arm64".into(),
+                ..Default::default()
+            },
             Compression::None,
         );
         let anon = "0c".repeat(32);
@@ -222,7 +248,7 @@ mod tests {
             size_bytes: 8,
             sha256: Sha256Digest::of(b"APPIMAGE"),
             origin: ImageOrigin::Built,
-            platform: None,
+            platform: Some(Platform::new("linux", "arm64")),
             inspect: json!({}),
         });
         store.put("/b/containers/web.tar", b"WEBFS");
@@ -254,12 +280,14 @@ mod tests {
         docker: &FakeDocker,
         store: &MemoryArchiveStore,
         progress: &RecordingProgress,
+        confirm: &FakeConfirm,
         request: &RestoreRequest,
     ) -> AppResult<RestoreReport> {
         RestoreService {
             docker,
             store,
             progress,
+            confirm,
         }
         .run(request)
     }
@@ -268,11 +296,16 @@ mod tests {
     fn restores_volumes_images_and_containers_into_an_empty_daemon() {
         let store = MemoryArchiveStore::new();
         seed(&store);
-        let (docker, progress) = (FakeDocker::default(), RecordingProgress::default());
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
         let report = run(
             &docker,
             &store,
             &progress,
+            &confirm,
             &request(RestorePolicy::default()),
         )
         .unwrap();
@@ -319,29 +352,32 @@ mod tests {
     fn existing_volume_is_skipped_unless_overwrite() {
         let store = MemoryArchiveStore::new();
         seed(&store);
-        let (docker, progress) = (
+        let (docker, progress, confirm) = (
             FakeDocker::default().with_volume("cache", b"OLD"),
             RecordingProgress::default(),
+            FakeConfirm::accepting(),
         );
         let report = run(
             &docker,
             &store,
             &progress,
+            &confirm,
             &request(RestorePolicy::default()),
         )
         .unwrap();
         assert_eq!(report.items[1].outcome, ItemOutcome::SkippedExisting);
         assert_eq!(docker.volumes.borrow()["cache"], b"OLD");
 
-        let (docker, progress) = (
+        let (docker, progress, confirm) = (
             FakeDocker::default().with_volume("cache", b"OLD"),
             RecordingProgress::default(),
+            FakeConfirm::accepting(),
         );
         let policy = RestorePolicy {
             overwrite: true,
             ..RestorePolicy::default()
         };
-        let report = run(&docker, &store, &progress, &request(policy)).unwrap();
+        let report = run(&docker, &store, &progress, &confirm, &request(policy)).unwrap();
         assert_eq!(report.items[1].outcome, ItemOutcome::Restored);
         assert_eq!(docker.volumes.borrow()["cache"], b"CACHE");
         let calls = docker.calls.borrow().clone();
@@ -353,12 +389,16 @@ mod tests {
     fn include_volatile_restores_anonymous_volumes() {
         let store = MemoryArchiveStore::new();
         seed(&store);
-        let (docker, progress) = (FakeDocker::default(), RecordingProgress::default());
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
         let policy = RestorePolicy {
             include_volatile: true,
             ..RestorePolicy::default()
         };
-        let report = run(&docker, &store, &progress, &request(policy)).unwrap();
+        let report = run(&docker, &store, &progress, &confirm, &request(policy)).unwrap();
         assert_eq!(report.items[2].outcome, ItemOutcome::Restored);
         assert_eq!(docker.volumes.borrow()[&"0c".repeat(32)], b"ANON");
     }
@@ -368,11 +408,16 @@ mod tests {
         let store = MemoryArchiveStore::new();
         seed(&store);
         store.put("/b/volumes/pgdata.tar", b"TAMPERED");
-        let (docker, progress) = (FakeDocker::default(), RecordingProgress::default());
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
         let err = run(
             &docker,
             &store,
             &progress,
+            &confirm,
             &request(RestorePolicy::default()),
         )
         .unwrap_err();
@@ -384,6 +429,8 @@ mod tests {
             }
         ));
         assert!(docker.calls.borrow().is_empty());
+        // Verification runs before any confirmation prompt.
+        assert!(confirm.asked.borrow().is_empty());
     }
 
     #[test]
@@ -391,10 +438,14 @@ mod tests {
         let store = MemoryArchiveStore::new();
         seed(&store);
         store.put("/b/volumes/pgdata.tar", b"TAMPERED");
-        let (docker, progress) = (FakeDocker::default(), RecordingProgress::default());
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
         let mut req = request(RestorePolicy::default());
         req.verify = false;
-        let report = run(&docker, &store, &progress, &req).unwrap();
+        let report = run(&docker, &store, &progress, &confirm, &req).unwrap();
         assert_eq!(report.items[0].outcome, ItemOutcome::Restored);
         assert_eq!(docker.volumes.borrow()["pgdata"], b"TAMPERED");
     }
@@ -403,14 +454,16 @@ mod tests {
     fn failed_item_is_reported_and_restore_continues() {
         let store = MemoryArchiveStore::new();
         seed(&store);
-        let (docker, progress) = (
+        let (docker, progress, confirm) = (
             FakeDocker::default().failing("pgdata"),
             RecordingProgress::default(),
+            FakeConfirm::accepting(),
         );
         let report = run(
             &docker,
             &store,
             &progress,
+            &confirm,
             &request(RestorePolicy::default()),
         )
         .unwrap();
@@ -423,14 +476,18 @@ mod tests {
     fn container_tag_is_configurable_and_kinds_can_be_disabled() {
         let store = MemoryArchiveStore::new();
         seed(&store);
-        let (docker, progress) = (FakeDocker::default(), RecordingProgress::default());
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
         let policy = RestorePolicy {
             volumes: false,
             images: false,
             container_tag: "from-backup".into(),
             ..RestorePolicy::default()
         };
-        let report = run(&docker, &store, &progress, &request(policy)).unwrap();
+        let report = run(&docker, &store, &progress, &confirm, &request(policy)).unwrap();
         assert_eq!(report.items.len(), 1);
         assert_eq!(docker.imported_containers.borrow()[0].0, "web:from-backup");
     }
@@ -446,13 +503,17 @@ mod tests {
                 &manifest.to_json().unwrap(),
             )
             .unwrap();
-        let (docker, progress) = (FakeDocker::default(), RecordingProgress::default());
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
         let policy = RestorePolicy {
             volumes: false,
             images: false,
             ..RestorePolicy::default()
         };
-        let report = run(&docker, &store, &progress, &request(policy)).unwrap();
+        let report = run(&docker, &store, &progress, &confirm, &request(policy)).unwrap();
         assert_eq!(report.items[0].name, "WebApp");
         assert_eq!(docker.imported_containers.borrow()[0].0, "webapp:restored");
     }
@@ -464,10 +525,14 @@ mod tests {
         store
             .pack_folder(Path::new("/b"), Path::new("/b.tar.bz2"))
             .unwrap();
-        let (docker, progress) = (FakeDocker::default(), RecordingProgress::default());
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
         let mut req = request(RestorePolicy::default());
         req.source = PathBuf::from("/b.tar.bz2");
-        let report = run(&docker, &store, &progress, &req).unwrap();
+        let report = run(&docker, &store, &progress, &confirm, &req).unwrap();
         assert_eq!(report.items[0].outcome, ItemOutcome::Restored);
         assert_eq!(store.unpacked.borrow().len(), 1);
         assert!(
@@ -481,15 +546,237 @@ mod tests {
     fn docker_unavailable_is_exit_code_3() {
         let store = MemoryArchiveStore::new();
         seed(&store);
-        let (docker, progress) = (FakeDocker::unavailable(), RecordingProgress::default());
+        let (docker, progress, confirm) = (
+            FakeDocker::unavailable(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
         let err = run(
             &docker,
             &store,
             &progress,
+            &confirm,
             &request(RestorePolicy::default()),
         )
         .unwrap_err();
         assert_eq!(err.exit_code(), 3);
         assert_eq!(err.to_string(), "docker is not available: fake daemon down");
+    }
+
+    #[test]
+    fn declining_the_first_prompt_aborts_before_touching_docker() {
+        let store = MemoryArchiveStore::new();
+        seed(&store);
+        let docker = FakeDocker::default();
+        let progress = RecordingProgress::default();
+        let confirm = FakeConfirm::declining_restore();
+        let error = run(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &request(RestorePolicy::default()),
+        )
+        .unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+        assert!(matches!(error, AppError::Aborted(_)));
+        assert!(
+            docker
+                .calls
+                .borrow()
+                .iter()
+                .all(|c| !c.starts_with("import")
+                    && !c.starts_with("load")
+                    && !c.starts_with("create"))
+        );
+        assert_eq!(*confirm.asked.borrow(), vec!["restore".to_string()]);
+    }
+
+    #[test]
+    fn same_arch_asks_once_and_previews_counts() {
+        let store = MemoryArchiveStore::new();
+        seed(&store);
+        let docker = FakeDocker::default();
+        let progress = RecordingProgress::default();
+        let confirm = FakeConfirm::accepting();
+        let report = run(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &request(RestorePolicy::default()),
+        )
+        .unwrap();
+        assert_eq!(*confirm.asked.borrow(), vec!["restore".to_string()]);
+        let preview = report.preview.as_ref().unwrap();
+        assert!(preview.mismatches.is_empty());
+        assert_eq!(preview.images_to_load, 1);
+        assert_eq!(preview.volumes_to_create, 2);
+        assert_eq!(preview.volumes_skipped, 1);
+    }
+
+    #[test]
+    fn arch_mismatch_asks_twice_and_skips_images_and_containers() {
+        let store = MemoryArchiveStore::new();
+        seed(&store);
+        let mut docker = FakeDocker::default();
+        docker.info.arch = "amd64".into();
+        let progress = RecordingProgress::default();
+        let confirm = FakeConfirm::accepting();
+        let report = run(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &request(RestorePolicy::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            *confirm.asked.borrow(),
+            vec!["restore".to_string(), "arch".to_string()]
+        );
+        let image = report
+            .items
+            .iter()
+            .find(|i| i.kind == ItemKind::Image)
+            .unwrap();
+        assert_eq!(
+            image.outcome,
+            ItemOutcome::SkippedArchMismatch {
+                platform: "linux/arm64".into(),
+                target: "linux/amd64".into()
+            }
+        );
+        let container = report
+            .items
+            .iter()
+            .find(|i| i.kind == ItemKind::Container)
+            .unwrap();
+        assert!(matches!(
+            container.outcome,
+            ItemOutcome::SkippedArchMismatch { .. }
+        ));
+        assert!(docker.loaded_images.borrow().is_empty());
+        assert!(docker.imported_containers.borrow().is_empty());
+        assert_eq!(report.exit_code(), 1);
+        // volumes still restored
+        assert_eq!(docker.volumes.borrow().get("pgdata").unwrap(), b"PG");
+    }
+
+    #[test]
+    fn declining_the_arch_prompt_aborts_before_touching_docker() {
+        let store = MemoryArchiveStore::new();
+        seed(&store);
+        let mut docker = FakeDocker::default();
+        docker.info.arch = "amd64".into();
+        let progress = RecordingProgress::default();
+        let confirm = FakeConfirm::declining_arch();
+        let error = run(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &request(RestorePolicy::default()),
+        )
+        .unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+        assert!(matches!(error, AppError::Aborted(_)));
+        assert!(
+            docker
+                .calls
+                .borrow()
+                .iter()
+                .all(|c| !c.starts_with("import")
+                    && !c.starts_with("load")
+                    && !c.starts_with("create"))
+        );
+        assert_eq!(
+            *confirm.asked.borrow(),
+            vec!["restore".to_string(), "arch".to_string()]
+        );
+    }
+
+    #[test]
+    fn force_flag_imports_despite_mismatch_but_still_asks_twice() {
+        let store = MemoryArchiveStore::new();
+        seed(&store);
+        let mut docker = FakeDocker::default();
+        docker.info.arch = "amd64".into();
+        let progress = RecordingProgress::default();
+        let confirm = FakeConfirm::accepting();
+        let policy = RestorePolicy {
+            force_arch_mismatch: true,
+            ..RestorePolicy::default()
+        };
+        let report = run(&docker, &store, &progress, &confirm, &request(policy)).unwrap();
+        assert_eq!(
+            *confirm.asked.borrow(),
+            vec!["restore".to_string(), "arch".to_string()]
+        );
+        let image = report
+            .items
+            .iter()
+            .find(|i| i.kind == ItemKind::Image)
+            .unwrap();
+        assert_eq!(image.outcome, ItemOutcome::Restored);
+        assert_eq!(docker.loaded_images.borrow().len(), 1);
+        assert_eq!(report.exit_code(), 0);
+    }
+
+    #[test]
+    fn legacy_manifest_without_item_platform_uses_backup_daemon_platform() {
+        let store = MemoryArchiveStore::new();
+        let mut manifest = seed(&store);
+        manifest.images[0].platform = None;
+        store
+            .write_text(
+                &Path::new("/b").join(MANIFEST_FILE),
+                &manifest.to_json().unwrap(),
+            )
+            .unwrap();
+        let mut docker = FakeDocker::default();
+        docker.info.arch = "amd64".into();
+        let progress = RecordingProgress::default();
+        let confirm = FakeConfirm::accepting();
+        let report = run(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &request(RestorePolicy::default()),
+        )
+        .unwrap();
+        let image = report
+            .items
+            .iter()
+            .find(|i| i.kind == ItemKind::Image)
+            .unwrap();
+        assert_eq!(
+            image.outcome,
+            ItemOutcome::SkippedArchMismatch {
+                platform: "linux/arm64".into(),
+                target: "linux/amd64".into()
+            }
+        );
+    }
+
+    #[test]
+    fn daemon_without_platform_is_refused_before_prompting() {
+        let store = MemoryArchiveStore::new();
+        seed(&store);
+        let mut docker = FakeDocker::default();
+        docker.info.os = "".into();
+        let progress = RecordingProgress::default();
+        let confirm = FakeConfirm::accepting();
+        let error = run(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &request(RestorePolicy::default()),
+        )
+        .unwrap_err();
+        assert_eq!(error.exit_code(), 3);
+        assert!(confirm.asked.borrow().is_empty());
     }
 }

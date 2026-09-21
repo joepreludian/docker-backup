@@ -7,16 +7,30 @@ use clap::Parser;
 use crate::application::backup::BackupService;
 use crate::application::doctor::DoctorService;
 use crate::application::info::InfoService;
-use crate::application::ports::Clock;
+use crate::application::ports::{Clock, ConfirmPort};
 use crate::application::restore::RestoreService;
 use crate::cli::{Cli, Command};
 use crate::domain::error::AppResult;
+use crate::domain::preview::RestorePreview;
 use crate::infrastructure::clock::SystemClock;
 use crate::infrastructure::docker_cli::DockerCli;
 use crate::infrastructure::fs_store::FsArchiveStore;
 use crate::infrastructure::progress::StderrProgress;
 use crate::infrastructure::tools::WhichToolLocator;
 use crate::presentation::{OutputFormat, renderer_for};
+
+// Task 6 replaces this with TerminalConfirm.
+struct AutoConfirm;
+
+impl ConfirmPort for AutoConfirm {
+    fn confirm_restore(&self, _preview: &RestorePreview) -> AppResult<()> {
+        Ok(())
+    }
+
+    fn confirm_arch_mismatch(&self, _preview: &RestorePreview) -> AppResult<()> {
+        Ok(())
+    }
+}
 
 pub fn run() -> i32 {
     let cli = match Cli::try_parse() {
@@ -40,6 +54,7 @@ pub fn run() -> i32 {
     let clock = SystemClock;
     let progress = StderrProgress::new();
     let tools = WhichToolLocator;
+    let confirm = AutoConfirm;
 
     // Unlocked handles: `Write` locks per call, so this doesn't hold stdout/stderr
     // for the whole run. `StderrProgress`'s ticker thread writes to stderr every
@@ -66,6 +81,7 @@ pub fn run() -> i32 {
             docker: &docker,
             store: &store,
             progress: &progress,
+            confirm: &confirm,
         }
         .run(&args.to_request())
         .and_then(|report| {

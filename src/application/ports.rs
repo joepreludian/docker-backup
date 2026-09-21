@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 
 use crate::domain::error::AppResult;
 use crate::domain::manifest::{Compression, DockerInfo, Sha256Digest, ToolInfo};
+use crate::domain::preview::RestorePreview;
 use crate::domain::refs::{ContainerRef, ImageRef, ItemKind, VolumeRef};
 use crate::domain::report::ItemOutcome;
 
@@ -92,6 +93,14 @@ pub trait ProgressSink {
     fn item_started(&self, kind: ItemKind, name: &str, index: usize);
     fn item_finished(&self, kind: ItemKind, name: &str, outcome: &ItemOutcome);
     fn finish(&self);
+}
+
+/// Asked before restore writes anything. `Err(AppError::Aborted(..))` stops the restore.
+pub trait ConfirmPort {
+    /// Shows the preview and asks to proceed.
+    fn confirm_restore(&self, preview: &RestorePreview) -> AppResult<()>;
+    /// Called only when `preview.mismatches` is not empty; asks "are you sure".
+    fn confirm_arch_mismatch(&self, preview: &RestorePreview) -> AppResult<()>;
 }
 
 pub trait Clock {

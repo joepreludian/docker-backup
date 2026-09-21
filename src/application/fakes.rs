@@ -9,11 +9,12 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 use crate::application::ports::{
-    ArchiveStore, Clock, DockerPort, Operation, ProgressSink, StoredFile, ToolLocator,
+    ArchiveStore, Clock, ConfirmPort, DockerPort, Operation, ProgressSink, StoredFile, ToolLocator,
 };
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::manifest::{Compression, DockerInfo, Sha256Digest, ToolInfo};
 use crate::domain::platform::Platform;
+use crate::domain::preview::RestorePreview;
 use crate::domain::refs::{ContainerRef, ImageOrigin, ImageRef, ItemKind, VolumeRef};
 use crate::domain::report::ItemOutcome;
 
@@ -288,6 +289,56 @@ impl DockerPort for FakeDocker {
             .borrow_mut()
             .push((tag.to_string(), content));
         Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct FakeConfirm {
+    pub decline_restore: bool,
+    pub decline_arch: bool,
+    pub asked: RefCell<Vec<String>>,
+    pub previews: RefCell<Vec<RestorePreview>>,
+}
+
+impl FakeConfirm {
+    pub fn accepting() -> Self {
+        Self::default()
+    }
+
+    pub fn declining_restore() -> Self {
+        Self {
+            decline_restore: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn declining_arch() -> Self {
+        Self {
+            decline_arch: true,
+            ..Self::default()
+        }
+    }
+}
+
+impl ConfirmPort for FakeConfirm {
+    fn confirm_restore(&self, preview: &RestorePreview) -> AppResult<()> {
+        self.asked.borrow_mut().push("restore".into());
+        self.previews.borrow_mut().push(preview.clone());
+        if self.decline_restore {
+            Err(AppError::Aborted("declined by test".into()))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn confirm_arch_mismatch(&self, preview: &RestorePreview) -> AppResult<()> {
+        self.asked.borrow_mut().push("arch".into());
+        self.previews.borrow_mut().push(preview.clone());
+        if self.decline_arch {
+            Err(AppError::Aborted("declined by test".into()))
+        } else {
+            Ok(())
+        }
     }
 }
 
