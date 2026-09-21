@@ -35,7 +35,8 @@ pub struct RestorePreview {
     pub images_to_load: usize,
     /// Containers with action Restore
     pub containers_to_import: usize,
-    /// Every image/container whose platform != target, regardless of force.
+    /// Every image/container whose platform is known and != target, regardless
+    /// of force. An unknown platform can't prove a mismatch, so it's excluded.
     pub mismatches: Vec<MismatchedItem>,
 }
 

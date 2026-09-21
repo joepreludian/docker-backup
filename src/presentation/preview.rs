@@ -40,7 +40,8 @@ fn cell(text: impl Into<String>, tone: Tone, color: bool) -> Cell {
 
 /// Everything a restore would do, shown before `Proceed? [y/N]`.
 pub fn format_restore_preview(preview: &RestorePreview, color: bool) -> String {
-    let mismatch = !preview.backup_platform.matches(&preview.target_platform);
+    let mismatch = preview.backup_platform.is_known()
+        && !preview.backup_platform.matches(&preview.target_platform);
     let target_value = if mismatch {
         format!("{} (mismatch)", preview.target_platform)
     } else {
@@ -182,6 +183,19 @@ mod tests {
         same.target_platform = Platform::new("Linux", "ARM64");
         let text = format_restore_preview(&same, false);
         assert!(!text.contains("(mismatch)"));
+    }
+
+    #[test]
+    fn restore_preview_omits_mismatch_marker_for_unknown_backup_platform() {
+        let mut unknown = preview();
+        unknown.backup_platform = Platform::default();
+        unknown.mismatches = Vec::new();
+        let text = format_restore_preview(&unknown, false);
+        assert!(text.contains("unknown"));
+        assert!(
+            !text.contains("(mismatch)"),
+            "an unknown backup platform can't prove a mismatch"
+        );
     }
 
     #[test]
