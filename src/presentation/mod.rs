@@ -2,11 +2,14 @@
 
 pub mod human;
 pub mod json;
+pub mod preview;
 
 use std::io::{self, Write};
 
 use crate::domain::error::AppError;
 use crate::domain::report::{BackupReport, DoctorReport, InfoReport, RestoreReport};
+
+pub use preview::{format_arch_warning, format_restore_preview};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
