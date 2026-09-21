@@ -90,8 +90,11 @@ impl RestoreService<'_> {
                     planned.exists,
                     request.policy.overwrite,
                 ),
-                // Volumes carry no platform, so `RestorePlan::build` never assigns them this action.
-                RestoreAction::SkipArchMismatch => unreachable!("volumes have no architecture"),
+                // Volumes carry no platform, so `RestorePlan::build` never assigns them this
+                // action; handled as a failure rather than panicking if that ever changes.
+                RestoreAction::SkipArchMismatch => ItemOutcome::Failed {
+                    error: "volumes have no architecture".into(),
+                },
             };
             self.progress
                 .item_finished(ItemKind::Volume, name, &outcome);
@@ -108,15 +111,20 @@ impl RestoreService<'_> {
             self.progress
                 .item_started(ItemKind::Image, &image.entry.reference, index);
             let outcome = match image.action {
-                RestoreAction::SkipArchMismatch => ItemOutcome::SkippedArchMismatch {
-                    platform: image.platform.to_string(),
-                    target: target.to_string(),
-                },
-                _ => to_outcome(
+                RestoreAction::Restore => to_outcome(
                     self.store
                         .open_item(&root.join(&image.entry.file), compression)
                         .and_then(|mut reader| self.docker.load_image(&mut reader)),
                 ),
+                RestoreAction::SkipArchMismatch => ItemOutcome::SkippedArchMismatch {
+                    platform: image.platform.to_string(),
+                    target: target.to_string(),
+                },
+                // Never produced for images today (`RestorePlan::build` doesn't check
+                // existence or volatility for images), mapped for consistency in case
+                // that ever changes.
+                RestoreAction::SkipExisting => ItemOutcome::SkippedExisting,
+                RestoreAction::SkipVolatile => ItemOutcome::SkippedVolatile,
             };
             self.progress
                 .item_finished(ItemKind::Image, &image.entry.reference, &outcome);
@@ -139,15 +147,20 @@ impl RestoreService<'_> {
                 request.policy.container_tag
             );
             let outcome = match container.action {
-                RestoreAction::SkipArchMismatch => ItemOutcome::SkippedArchMismatch {
-                    platform: container.platform.to_string(),
-                    target: target.to_string(),
-                },
-                _ => to_outcome(
+                RestoreAction::Restore => to_outcome(
                     self.store
                         .open_item(&root.join(&container.entry.file), compression)
                         .and_then(|mut reader| self.docker.import_container_fs(&mut reader, &tag)),
                 ),
+                RestoreAction::SkipArchMismatch => ItemOutcome::SkippedArchMismatch {
+                    platform: container.platform.to_string(),
+                    target: target.to_string(),
+                },
+                // Never produced for containers today (`RestorePlan::build` doesn't
+                // check existence or volatility for containers), mapped for
+                // consistency in case that ever changes.
+                RestoreAction::SkipExisting => ItemOutcome::SkippedExisting,
+                RestoreAction::SkipVolatile => ItemOutcome::SkippedVolatile,
             };
             self.progress
                 .item_finished(ItemKind::Container, &container.entry.name, &outcome);

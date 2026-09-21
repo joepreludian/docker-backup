@@ -51,6 +51,9 @@ impl Platform {
 
 impl fmt::Display for Platform {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.is_known() {
+            return write!(f, "unknown");
+        }
         if self.variant.is_empty() {
             write!(f, "{}/{}", self.os, self.arch)
         } else {
@@ -104,6 +107,11 @@ mod tests {
     #[test]
     fn display_omits_empty_variant() {
         assert_eq!(Platform::new("linux", "amd64").to_string(), "linux/amd64");
+    }
+
+    #[test]
+    fn display_shows_unknown_for_unknown_platform() {
+        assert_eq!(Platform::default().to_string(), "unknown");
     }
 
     #[test]

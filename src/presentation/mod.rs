@@ -44,6 +44,8 @@ mod tests {
     use crate::domain::manifest::{
         Compression, DockerInfo, Manifest, Sha256Digest, ToolInfo, VolumeEntry,
     };
+    use crate::domain::platform::Platform;
+    use crate::domain::preview::{MismatchedItem, RestorePreview};
     use crate::domain::refs::ItemKind;
     use crate::domain::report::{
         BackupReport, ContainerCounts, DoctorReport, ImageCounts, InfoReport, ItemOutcome,
@@ -51,6 +53,7 @@ mod tests {
     };
     use crate::domain::verification::{FileCheck, FileStatus, VerificationReport};
     use serde_json::{Value, json};
+    use time::format_description::well_known::Rfc3339;
     use time::macros::datetime;
 
     fn backup_report() -> BackupReport {
@@ -110,6 +113,27 @@ mod tests {
         }
     }
 
+    fn restore_preview() -> RestorePreview {
+        RestorePreview {
+            source: "/backups/out".into(),
+            created_at: datetime!(2026-09-19 14:03:11 UTC),
+            backup_platform: Platform::new("linux", "amd64"),
+            target_platform: Platform::new("linux", "arm64"),
+            overwrite: false,
+            force_arch_mismatch: false,
+            volumes_to_create: 1,
+            volumes_to_overwrite: 0,
+            volumes_skipped: 0,
+            images_to_load: 0,
+            containers_to_import: 0,
+            mismatches: vec![MismatchedItem {
+                kind: ItemKind::Image,
+                name: "app:latest".into(),
+                platform: Platform::new("linux", "amd64"),
+            }],
+        }
+    }
+
     fn doctor_report() -> DoctorReport {
         DoctorReport {
             docker: None,
@@ -159,6 +183,25 @@ mod tests {
     }
 
     #[test]
+    fn json_restore_serializes_preview() {
+        let restore = RestoreReport {
+            source: "/b".into(),
+            preview: Some(restore_preview()),
+            items: vec![],
+        };
+        let value = render_json(|r, out| r.render_restore(&restore, out));
+        assert_eq!(value["preview"]["target_platform"]["arch"], "arm64");
+        assert_eq!(value["preview"]["mismatches"][0]["name"], "app:latest");
+        let created_at = value["preview"]["created_at"]
+            .as_str()
+            .expect("created_at should be a string");
+        assert!(
+            time::OffsetDateTime::parse(created_at, &Rfc3339).is_ok(),
+            "created_at should be an RFC 3339 string, got {created_at:?}"
+        );
+    }
+
+    #[test]
     fn json_info_and_doctor_serialize() {
         let info = render_json(|r, out| r.render_info(&info_report(), out));
         assert_eq!(info["verification"]["files"][0]["status"], "missing");
@@ -200,7 +243,9 @@ mod tests {
     fn human_restore_info_and_doctor_render() {
         let restore = RestoreReport {
             source: "/b".into(),
-            preview: None,
+            // Populated so JSON coverage exists elsewhere (json_restore_serializes_preview);
+            // the human renderer must still ignore it and only show the items table below.
+            preview: Some(restore_preview()),
             items: vec![ItemResult {
                 kind: ItemKind::Volume,
                 name: "v".into(),
@@ -210,6 +255,10 @@ mod tests {
         };
         let text = render_human(|r, out| r.render_restore(&restore, out));
         assert!(text.contains("skipped (exists)"));
+        assert!(
+            !text.contains("app:latest"),
+            "human restore output ignores the preview"
+        );
 
         let text = render_human(|r, out| r.render_info(&info_report(), out));
         assert!(text.contains("2026-09-19T14:03:11Z"));

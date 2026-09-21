@@ -64,12 +64,16 @@ pub fn run() -> i32 {
             })
         }
         Command::Restore(args) => {
+            // Prompts/boxes go to stderr, not stdout, so they get their own color
+            // decision based on stderr's tty-ness (not `color`, which is stdout's).
+            let prompt_color =
+                !cli.json && io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
             let confirm = TerminalConfirm::new(
                 io::BufReader::new(io::stdin()),
                 io::stderr(),
                 args.yes,
                 io::stdin().is_terminal() && !cli.json,
-                color,
+                prompt_color,
             );
             RestoreService {
                 docker: &docker,

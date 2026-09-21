@@ -40,7 +40,7 @@ impl<R: BufRead, W: Write> TerminalConfirm<R, W> {
         }
         if !self.interactive {
             return Err(AppError::Aborted(
-                "stdin is not a terminal; pass --yes to restore without confirmation".into(),
+                "not running interactively (--json or stdin is not a terminal); pass --yes to restore without confirmation".into(),
             ));
         }
 
@@ -138,7 +138,10 @@ mod tests {
         let confirm =
             TerminalConfirm::new(Cursor::new(Vec::new()), Vec::new(), false, false, false);
         let error = confirm.confirm_restore(&preview()).unwrap_err();
-        assert!(error.to_string().contains("--yes"));
+        let message = error.to_string();
+        assert!(message.contains("--yes"));
+        // Must not blame "stdin" alone: `--json` in a real terminal is also non-interactive.
+        assert!(message.contains("not running interactively (--json or stdin is not a terminal)"));
     }
 
     #[test]

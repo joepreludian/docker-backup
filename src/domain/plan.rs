@@ -268,9 +268,11 @@ impl RestorePlan {
             .filter(|c| c.action == RestoreAction::Restore)
             .count();
 
+        // An unknown platform can't prove a mismatch, so it's never listed as one
+        // (kept in sync with `arch_action` below).
         let mut mismatches = Vec::new();
         for image in &self.images {
-            if !image.platform.matches(&self.target) {
+            if image.platform.is_known() && !image.platform.matches(&self.target) {
                 mismatches.push(MismatchedItem {
                     kind: ItemKind::Image,
                     name: image.entry.reference.clone(),
@@ -279,7 +281,7 @@ impl RestorePlan {
             }
         }
         for container in &self.containers {
-            if !container.platform.matches(&self.target) {
+            if container.platform.is_known() && !container.platform.matches(&self.target) {
                 mismatches.push(MismatchedItem {
                     kind: ItemKind::Container,
                     name: container.entry.name.clone(),
@@ -313,10 +315,12 @@ impl RestorePlan {
     }
 }
 
-/// `Restore` when the item's platform matches the target (or mismatches are
-/// forced through anyway), `SkipArchMismatch` otherwise.
+/// `Restore` when the item's platform matches the target, when the platform is
+/// unknown (an unknown platform can't prove a mismatch — 0.1.0 manifests never
+/// recorded one), or when mismatches are forced through anyway.
+/// `SkipArchMismatch` otherwise.
 fn arch_action(platform: &Platform, target: &Platform, policy: &RestorePolicy) -> RestoreAction {
-    if platform.matches(target) || policy.force_arch_mismatch {
+    if !platform.is_known() || platform.matches(target) || policy.force_arch_mismatch {
         RestoreAction::Restore
     } else {
         RestoreAction::SkipArchMismatch
@@ -543,6 +547,52 @@ mod tests {
         let plan = RestorePlan::build(&m, &[], &forced, &arm);
         assert_eq!(plan.images[0].action, RestoreAction::Restore);
         assert_eq!(plan.containers[0].action, RestoreAction::Restore);
+    }
+
+    #[test]
+    fn unknown_source_platform_is_restorable_and_not_a_mismatch() {
+        // A 0.1.0-era manifest: no docker.os/arch recorded, entries have no platform.
+        let mut m = Manifest::new(
+            datetime!(2026-09-19 00:00:00 UTC),
+            DockerInfo::default(),
+            Compression::None,
+        );
+        m.images.push(ImageEntry {
+            reference: "app:latest".into(),
+            id: "sha256:2".into(),
+            file: "images/app_latest.tar".into(),
+            size_bytes: 1,
+            sha256: Sha256Digest::of(b"y"),
+            origin: ImageOrigin::Built,
+            platform: None,
+            inspect: json!({}),
+        });
+        m.containers.push(ContainerEntry {
+            name: "web".into(),
+            id: "c1".into(),
+            image: "nginx".into(),
+            file: "containers/web.tar".into(),
+            size_bytes: 1,
+            sha256: Sha256Digest::of(b"z"),
+            platform: None,
+            inspect: json!({}),
+        });
+
+        let target = Platform::new("linux", "arm64");
+        let policy = RestorePolicy::default();
+        let plan = RestorePlan::build(&m, &[], &policy, &target);
+        assert_eq!(
+            plan.images[0].action,
+            RestoreAction::Restore,
+            "an unknown platform can't prove a mismatch"
+        );
+        assert_eq!(plan.containers[0].action, RestoreAction::Restore);
+
+        let preview = plan.preview(&m, Path::new("/b"), &policy);
+        assert!(
+            preview.mismatches.is_empty(),
+            "unknown-platform items must not be listed as mismatches"
+        );
     }
 
     #[test]
