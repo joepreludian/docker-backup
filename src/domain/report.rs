@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::manifest::{Compression, DockerInfo, Manifest, ToolInfo};
+use crate::domain::preview::RestorePreview;
 use crate::domain::refs::ItemKind;
 use crate::domain::verification::VerificationReport;
 
@@ -15,12 +16,16 @@ pub enum ItemOutcome {
     Restored,
     SkippedExisting,
     SkippedVolatile,
+    SkippedArchMismatch { platform: String, target: String },
     Failed { error: String },
 }
 
 impl ItemOutcome {
     pub fn is_failure(&self) -> bool {
-        matches!(self, ItemOutcome::Failed { .. })
+        matches!(
+            self,
+            ItemOutcome::Failed { .. } | ItemOutcome::SkippedArchMismatch { .. }
+        )
     }
 
     pub fn label(&self) -> String {
@@ -29,6 +34,9 @@ impl ItemOutcome {
             ItemOutcome::Restored => "restored".to_string(),
             ItemOutcome::SkippedExisting => "skipped (exists)".to_string(),
             ItemOutcome::SkippedVolatile => "skipped (volatile)".to_string(),
+            ItemOutcome::SkippedArchMismatch { platform, target } => {
+                format!("skipped (arch mismatch: {platform}, daemon is {target})")
+            }
             ItemOutcome::Failed { error } => format!("failed ({error})"),
         }
     }
@@ -103,6 +111,8 @@ impl BackupReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreReport {
     pub source: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<RestorePreview>,
     pub items: Vec<ItemResult>,
 }
 
@@ -220,6 +230,22 @@ mod tests {
             .is_failure()
         );
         assert!(!ItemOutcome::SkippedExisting.is_failure());
+    }
+
+    #[test]
+    fn arch_mismatch_skip_counts_as_failure_and_explains_itself() {
+        let outcome = ItemOutcome::SkippedArchMismatch {
+            platform: "linux/amd64".into(),
+            target: "linux/arm64".into(),
+        };
+        assert!(outcome.is_failure());
+        assert_eq!(
+            outcome.label(),
+            "skipped (arch mismatch: linux/amd64, daemon is linux/arm64)"
+        );
+        let json = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(json["status"], "skipped_arch_mismatch");
+        assert_eq!(json["platform"], "linux/amd64");
     }
 
     #[test]

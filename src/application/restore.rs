@@ -143,6 +143,7 @@ impl RestoreService<'_> {
         self.progress.finish();
         Ok(RestoreReport {
             source: request.source.clone(),
+            preview: None,
             items,
         })
     }

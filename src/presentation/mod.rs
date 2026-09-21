@@ -197,6 +197,7 @@ mod tests {
     fn human_restore_info_and_doctor_render() {
         let restore = RestoreReport {
             source: "/b".into(),
+            preview: None,
             items: vec![ItemResult {
                 kind: ItemKind::Volume,
                 name: "v".into(),

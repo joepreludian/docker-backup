@@ -63,7 +63,7 @@ impl HumanRenderer {
         let tone = match outcome {
             ItemOutcome::Done { .. } | ItemOutcome::Restored => Tone::Good,
             ItemOutcome::SkippedExisting | ItemOutcome::SkippedVolatile => Tone::Warn,
-            ItemOutcome::Failed { .. } => Tone::Bad,
+            ItemOutcome::SkippedArchMismatch { .. } | ItemOutcome::Failed { .. } => Tone::Bad,
         };
         self.cell(&outcome.label(), tone)
     }

@@ -18,6 +18,8 @@ pub enum AppError {
     VerificationFailed { missing: usize, corrupt: usize },
     #[error("{0}")]
     Conflict(String),
+    #[error("aborted: {0}")]
+    Aborted(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -29,7 +31,7 @@ impl AppError {
     pub fn exit_code(&self) -> i32 {
         match self {
             AppError::DockerUnavailable(_) | AppError::ToolMissing(_) => 3,
-            AppError::Conflict(_) => 2,
+            AppError::Conflict(_) | AppError::Aborted(_) => 2,
             _ => 1,
         }
     }
@@ -45,6 +47,7 @@ impl AppError {
             AppError::ManifestUnsupportedVersion(_) => "manifest_unsupported_version",
             AppError::VerificationFailed { .. } => "verification_failed",
             AppError::Conflict(_) => "conflict",
+            AppError::Aborted(_) => "aborted",
             AppError::Io(_) => "io",
         }
     }
@@ -59,6 +62,7 @@ mod tests {
         assert_eq!(AppError::DockerUnavailable("x".into()).exit_code(), 3);
         assert_eq!(AppError::ToolMissing("bzip2".into()).exit_code(), 3);
         assert_eq!(AppError::Conflict("bad".into()).exit_code(), 2);
+        assert_eq!(AppError::Aborted("no".into()).exit_code(), 2);
         assert_eq!(AppError::ManifestInvalid("bad".into()).exit_code(), 1);
         assert_eq!(
             AppError::VerificationFailed {
@@ -88,5 +92,6 @@ mod tests {
             "docker_unavailable"
         );
         assert_eq!(AppError::Io(std::io::Error::other("x")).kind(), "io");
+        assert_eq!(AppError::Aborted("no".into()).kind(), "aborted");
     }
 }
