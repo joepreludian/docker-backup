@@ -40,7 +40,7 @@ fn cell(text: impl Into<String>, tone: Tone, color: bool) -> Cell {
 
 /// Everything a restore would do, shown before `Proceed? [y/N]`.
 pub fn format_restore_preview(preview: &RestorePreview, color: bool) -> String {
-    let mismatch = preview.backup_platform != preview.target_platform;
+    let mismatch = !preview.backup_platform.matches(&preview.target_platform);
     let target_value = if mismatch {
         format!("{} (mismatch)", preview.target_platform)
     } else {
@@ -169,6 +169,19 @@ mod tests {
         assert!(text.contains("linux/arm64 (mismatch)"));
         assert!(text.contains("1 to create, 0 to overwrite, 1 skipped"));
         assert!(text.contains("1 to load"));
+    }
+
+    #[test]
+    fn restore_preview_omits_mismatch_marker_for_case_and_variant_only_differences() {
+        let mut same = preview();
+        same.backup_platform = Platform {
+            os: "linux".into(),
+            arch: "arm64".into(),
+            variant: "v8".into(),
+        };
+        same.target_platform = Platform::new("Linux", "ARM64");
+        let text = format_restore_preview(&same, false);
+        assert!(!text.contains("(mismatch)"));
     }
 
     #[test]
