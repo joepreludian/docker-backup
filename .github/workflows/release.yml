@@ -93,7 +93,7 @@ jobs:
           tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
           file "dist/${stage}/docker-backup"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tarball-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -234,7 +234,7 @@ jobs:
             security delete-keychain "$KEYCHAIN"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tarball-macos
           path: dist/*.tar.gz
