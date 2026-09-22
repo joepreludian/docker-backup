@@ -24,7 +24,7 @@ thiserror = "2"
 comfy-table = "7"
 indicatif = "0.17"
 console = "0.15"
-which = "7"
+which = "8"
 tempfile = "3"
 
 [dev-dependencies]
