@@ -14,7 +14,7 @@ enum Tone {
 fn table(color: bool) -> Table {
     let mut table = Table::new();
     table
-        .load_preset(UTF8_FULL_CONDENSED)
+        .load_style(UTF8_FULL_CONDENSED)
         .set_content_arrangement(ContentArrangement::Dynamic);
     if color {
         // Tests (and piped output) aren't a tty; without this, comfy-table

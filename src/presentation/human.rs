@@ -20,7 +20,7 @@ impl HumanRenderer {
     fn table(&self, header: &[&str]) -> Table {
         let mut table = Table::new();
         table
-            .load_preset(UTF8_FULL_CONDENSED)
+            .load_style(UTF8_FULL_CONDENSED)
             .set_content_arrangement(ContentArrangement::Dynamic)
             .set_header(header.to_vec());
         if self.color {
