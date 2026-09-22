@@ -20,7 +20,7 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       publish: ${{ steps.resolve.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -61,7 +61,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Supplies the musl-gcc linker driver that the Rust musl targets call
       # through `cc`. On the arm runner the same package targets aarch64.
@@ -108,7 +108,7 @@ jobs:
     env:
       TARGETS: "aarch64-apple-darwin x86_64-apple-darwin"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Refuse early rather than quietly shipping an unsigned macOS binary.
       - name: Require signing secrets
@@ -250,7 +250,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v4
         with:
