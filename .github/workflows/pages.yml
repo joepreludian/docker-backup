@@ -1,0 +1,56 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/site/**"
+      - "install.sh"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time. A queued run supersedes another waiting run, but never
+# cancels a deployment already in flight.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # enablement: true creates the Pages site on the first run, so the repo
+      # needs no manual visit to Settings.
+      - uses: actions/configure-pages@v6
+        with:
+          enablement: true
+
+      # install.sh lives at the repo root, where it is obvious to anyone
+      # browsing the project and easy for CI to lint. Copying it in at deploy
+      # time means the served script and the one in git are never two files
+      # that can drift apart.
+      - name: Stage the site
+        run: |
+          mkdir -p _site
+          cp -R docs/site/. _site/
+          cp install.sh _site/install.sh
+          ls -l _site
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - id: deploy
+        uses: actions/deploy-pages@v5

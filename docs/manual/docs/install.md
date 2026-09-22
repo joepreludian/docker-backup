@@ -15,10 +15,63 @@ You also need a reachable daemon. Docker Desktop, Colima, Rancher Desktop, and a
 plain Linux `dockerd` all work; the tool talks to whichever context is current,
 or to the one named with `--docker-context`.
 
+## Homebrew
+
+The quickest route on macOS, and on Linux with Homebrew installed:
+
+```bash
+brew install joepreludian/tap/docker-backup
+```
+
+That taps [joepreludian/homebrew-tap](https://github.com/joepreludian/homebrew-tap)
+and installs the same signed, notarized binary attached to the release — Homebrew
+does not rebuild it from source. Later versions arrive with `brew upgrade`.
+
+The formula deliberately does **not** declare a dependency on a `docker`
+package. Homebrew's `docker` formula would collide with the Docker Desktop,
+Colima or Rancher Desktop installation you probably already have, so the docker
+CLI stays yours to manage. `docker-backup doctor` reports it if it is missing.
+
+## Install script
+
+No Homebrew, and no root:
+
+```bash
+curl -fsSL https://docker-backup.jon.dev.br/install.sh | sh
+```
+
+It detects your operating system and architecture, downloads the matching
+release archive, **checks it against the SHA-256 published alongside the
+release**, and only then installs the binary into `~/.local/bin`. Nothing is
+written before the checksum matches, and the script never asks for `sudo`.
+
+Two environment variables change what it does:
+
+| Variable | Effect |
+| --- | --- |
+| `DOCKER_BACKUP_VERSION` | install this version instead of the latest release |
+| `DOCKER_BACKUP_BIN_DIR` | install here instead of `~/.local/bin` |
+
+```bash
+curl -fsSL https://docker-backup.jon.dev.br/install.sh | DOCKER_BACKUP_VERSION=0.2.0 sh
+```
+
+If `~/.local/bin` is not on your `PATH`, the script says so and prints the exact
+line to add for your shell. It also warns you when a different `docker-backup`
+earlier on your `PATH` would shadow the one it has just installed.
+
+!!! tip "Read it before you run it"
+
+    Piping a script from the internet into a shell deserves a look first. This
+    one is a single file —
+    [install.sh](https://github.com/joepreludian/docker-backup/blob/main/install.sh)
+    — and `curl -fsSL https://docker-backup.jon.dev.br/install.sh | less` shows
+    you exactly what would run.
+
 ## Download a release
 
-Releases are published for four targets. Pick yours, verify it, and put the
-binary on your `PATH`.
+If you would rather not use either of the above, releases are published for
+four targets. Pick yours, verify it, and put the binary on your `PATH`.
 
 === "Linux (x86_64)"
 
