@@ -1,0 +1,301 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  resolve:
+    name: Resolve version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      publish: ${{ steps.resolve.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # A manual run builds and signs everything but publishes nothing, so the
+      # whole release path can be exercised without inventing a throwaway tag.
+      - name: Resolve version and publish mode
+        id: resolve
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "could not read the version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$version" ]; then
+              echo "tag $tag does not match Cargo.toml version $version" >&2
+              exit 1
+            fi
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building version $version" >> "$GITHUB_STEP_SUMMARY"
+
+  build-linux:
+    name: Build ${{ matrix.target }}
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      # Supplies the musl-gcc linker driver that the Rust musl targets call
+      # through `cc`. On the arm runner the same package targets aarch64.
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          stage="docker-backup-${VERSION}-${TARGET}"
+          mkdir -p "dist/${stage}"
+          cp "target/${TARGET}/release/docker-backup" "dist/${stage}/"
+          cp README.md LICENSE "dist/${stage}/"
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+          file "dist/${stage}/docker-backup"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos:
+    name: Build, sign and notarize macOS
+    needs: resolve
+    runs-on: macos-14
+    timeout-minutes: 60
+    env:
+      TARGETS: "aarch64-apple-darwin x86_64-apple-darwin"
+    steps:
+      - uses: actions/checkout@v4
+
+      # Refuse early rather than quietly shipping an unsigned macOS binary.
+      - name: Require signing secrets
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          missing=""
+          for name in CERT_P12 CERT_PASSWORD SIGNING_IDENTITY API_KEY_ID API_ISSUER_ID API_KEY_P8; do
+            if [ -z "${!name}" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "missing macOS signing secrets:$missing" >&2
+            exit 1
+          fi
+
+      # Every dependency is pure Rust over libc, so the Intel target
+      # cross-compiles from this arm64 runner with no extra toolchain.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build both architectures
+        run: |
+          for target in $TARGETS; do
+            cargo build --release --locked --target "$target"
+          done
+
+      # set-key-partition-list is what stops codesign from blocking on a
+      # keychain prompt that no runner can answer.
+      - name: Import signing certificate
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/build.keychain-db"
+          keychain_password="$(openssl rand -base64 24)"
+          echo "KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      # Symbols are stripped at link time by the release profile, so the
+      # binaries are already final here. Stripping after signing would
+      # invalidate the signature.
+      - name: Sign
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          for target in $TARGETS; do
+            binary="target/$target/release/docker-backup"
+            codesign --force --options runtime --timestamp \
+              --sign "$SIGNING_IDENTITY" "$binary"
+            codesign --verify --strict --verbose=2 "$binary"
+          done
+
+      - name: Notarize
+        env:
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          key="$RUNNER_TEMP/notary.p8"
+          printf '%s' "$API_KEY_P8" | base64 --decode > "$key"
+          for target in $TARGETS; do
+            binary="target/$target/release/docker-backup"
+            zip="$RUNNER_TEMP/$target.zip"
+            ditto -c -k --keepParent "$binary" "$zip"
+            set +e
+            output="$(xcrun notarytool submit "$zip" \
+              --key "$key" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" \
+              --wait --timeout 30m --output-format json)"
+            code=$?
+            set -e
+            echo "$output"
+            id="$(printf '%s' "$output" | jq -r '.id // empty')"
+            status="$(printf '%s' "$output" | jq -r '.status // empty')"
+            if [ "$code" -ne 0 ] || [ "$status" != "Accepted" ]; then
+              if [ -n "$id" ]; then
+                xcrun notarytool log "$id" \
+                  --key "$key" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" || true
+              fi
+              echo "notarization failed for $target (status=${status:-unknown})" >&2
+              exit 1
+            fi
+          done
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          for target in $TARGETS; do
+            stage="docker-backup-${VERSION}-${target}"
+            mkdir -p "dist/${stage}"
+            cp "target/${target}/release/docker-backup" "dist/${stage}/"
+            cp README.md LICENSE "dist/${stage}/"
+            tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+          done
+          ls -l dist
+
+      # Runs even when signing or notarization failed, so no certificate and
+      # no private key is ever left behind on the runner.
+      - name: Clean up signing material
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/notary.p8"
+          if [ -n "${KEYCHAIN:-}" ] && [ -f "$KEYCHAIN" ]; then
+            security delete-keychain "$KEYCHAIN"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-macos
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: [resolve, build-linux, build-macos]
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: tarball-*
+          merge-multiple: true
+
+      - name: Write checksums
+        run: |
+          cd dist
+          sha256sum ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          cat > "$RUNNER_TEMP/preamble.md" <<'EOF'
+          ## Install
+
+          Download the archive for your platform, verify it against `SHA256SUMS`,
+          then put the binary on your `PATH`:
+
+              tar -xzf docker-backup-<version>-<target>.tar.gz
+              sudo install docker-backup-<version>-<target>/docker-backup /usr/local/bin/
+
+          Linux builds are statically linked against musl and run on any
+          distribution. macOS builds are signed with a Developer ID certificate
+          and notarized by Apple; the first run of a copy downloaded through a
+          browser performs an online Gatekeeper check.
+
+          Note that `restore` asks for confirmation before it changes anything.
+          Pass `--yes` when scripting it or when using `--json`.
+          EOF
+          prerelease=""
+          case "$TAG" in
+            *-*) prerelease="--prerelease" ;;
+          esac
+          # shellcheck disable=SC2086
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/preamble.md" \
+            --generate-notes \
+            --verify-tag \
+            $prerelease \
+            dist/*.tar.gz dist/SHA256SUMS

@@ -6,6 +6,28 @@ writes can also be restored by hand.
 
 ## Install
 
+Download the archive for your platform from the [latest
+release](https://github.com/joepreludian/docker-backup/releases/latest), verify
+it, and put the binary on your PATH:
+
+    VERSION=0.2.0
+    TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin,
+                                  # x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+    BASE=https://github.com/joepreludian/docker-backup/releases/download/v$VERSION
+
+    curl -fLO $BASE/docker-backup-$VERSION-$TARGET.tar.gz
+    curl -fLO $BASE/SHA256SUMS
+    sha256sum -c --ignore-missing SHA256SUMS      # shasum -a 256 -c on macOS
+    tar -xzf docker-backup-$VERSION-$TARGET.tar.gz
+    sudo install docker-backup-$VERSION-$TARGET/docker-backup /usr/local/bin/
+
+Linux builds are statically linked against musl and run on any distribution.
+macOS builds are signed with a Developer ID certificate and notarized by Apple.
+A ticket cannot be stapled to a bare executable, so a copy downloaded through a
+browser does an online Gatekeeper check the first time it runs.
+
+From source instead:
+
     cargo install --path .
 
 Requires `docker`, `tar`, and (for bzip2 options) `bzip2` on PATH.
@@ -103,6 +125,12 @@ Manual restore of a volume without this tool:
 
     cargo test                                                   # unit + CLI tests
     DOCKER_BACKUP_IT=1 cargo test --test docker_integration -- --ignored --test-threads=1   # real daemon
+
+Every push and pull request runs formatting, clippy, the test suite on Linux and
+macOS, and the integration tests against a real daemon. Pushing a `v*` tag builds
+the four release targets, signs and notarizes the macOS binaries, and publishes a
+GitHub Release. The release workflow can also be started by hand to build and
+sign without publishing anything.
 
 ## License
 
