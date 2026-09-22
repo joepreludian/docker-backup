@@ -76,3 +76,28 @@ jobs:
         env:
           DOCKER_BACKUP_IT: "1"
         run: cargo test --test docker_integration -- --ignored --test-threads=1
+
+  install-script:
+    name: Install script (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@v7
+
+      # shellcheck ships on the Ubuntu runners but not the macOS ones.
+      - name: Lint
+        if: runner.os == 'Linux'
+        run: shellcheck --shell=sh --severity=style install.sh
+
+      # This is the command strangers are told to pipe into their shell, so it
+      # runs for real against the published release rather than being trusted.
+      - name: Install into a throwaway directory
+        env:
+          DOCKER_BACKUP_BIN_DIR: ${{ runner.temp }}/install-test
+        run: |
+          sh install.sh
+          "$DOCKER_BACKUP_BIN_DIR/docker-backup" --version

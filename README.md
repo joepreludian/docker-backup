@@ -5,11 +5,21 @@ filesystems. The output is a plain folder with a `manifest.json`, so anything it
 writes can also be restored by hand.
 
 **[Read the manual](https://docker-backup.readthedocs.io/)** for installation,
-a quickstart, and full guides to backing up and restoring.
+a quickstart, and full guides to backing up and restoring, or visit
+[docker-backup.jon.dev.br](https://docker-backup.jon.dev.br/).
 
 ## Install
 
-Download the archive for your platform from the [latest
+With Homebrew, on macOS or Linux:
+
+    brew install joepreludian/tap/docker-backup
+
+Or into `~/.local/bin`, with no `sudo` and the download checked against the
+release's published SHA-256 before anything is written:
+
+    curl -fsSL https://docker-backup.jon.dev.br/install.sh | sh
+
+Or download the archive for your platform from the [latest
 release](https://github.com/joepreludian/docker-backup/releases/latest), verify
 it, and put the binary on your PATH:
 
