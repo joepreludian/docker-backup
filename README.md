@@ -30,7 +30,7 @@ it, and put the binary on your PATH:
 
     curl -fLO $BASE/docker-backup-$VERSION-$TARGET.tar.gz
     curl -fLO $BASE/SHA256SUMS
-    sha256sum -c --ignore-missing SHA256SUMS      # shasum -a 256 -c on macOS
+    sha256sum -c --ignore-missing SHA256SUMS      # shasum -a 256 -c --ignore-missing on macOS
     tar -xzf docker-backup-$VERSION-$TARGET.tar.gz
     sudo install docker-backup-$VERSION-$TARGET/docker-backup /usr/local/bin/
 
