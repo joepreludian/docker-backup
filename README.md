@@ -103,3 +103,12 @@ Manual restore of a volume without this tool:
 
     cargo test                                                   # unit + CLI tests
     DOCKER_BACKUP_IT=1 cargo test --test docker_integration -- --ignored --test-threads=1   # real daemon
+
+## License
+
+GPLv3 or later. See [LICENSE](LICENSE) for the full text.
+
+    docker-backup, copyright (C) 2026 Jon Trigueiro
+    This program comes with ABSOLUTELY NO WARRANTY.
+    This is free software, and you are welcome to redistribute it
+    under the conditions of the GNU General Public License version 3.

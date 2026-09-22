@@ -3,7 +3,7 @@ name = "docker-backup"
 version = "0.2.0"
 edition = "2024"
 description = "Coordinate docker CLI backups and restores of volumes, images and containers"
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "docker_backup"
