@@ -31,16 +31,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # enablement: true creates the Pages site on the first run, so the repo
-      # needs no manual visit to Settings.
+      # Pages must already be enabled on the repo. The workflow's GITHUB_TOKEN
+      # cannot create the site -- configure-pages fails with "Resource not
+      # accessible by integration" -- so `enablement: true` is not an option
+      # here. Enable it once, out of band:
+      #     gh api -X POST repos/OWNER/REPO/pages -f build_type=workflow
       - uses: actions/configure-pages@v6
-        with:
-          enablement: true
 
       # install.sh lives at the repo root, where it is obvious to anyone
       # browsing the project and easy for CI to lint. Copying it in at deploy
       # time means the served script and the one in git are never two files
       # that can drift apart.
+      #
+      # docs/site/CNAME is copied along with everything else, but Pages ignores
+      # it for Actions-built sites: the custom domain lives in the repo's Pages
+      # settings instead, set once with
+      #     gh api -X PUT repos/OWNER/REPO/pages -f cname=...
       - name: Stage the site
         run: |
           mkdir -p _site

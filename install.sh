@@ -55,10 +55,12 @@ latest_version() {
     echo "$version"
 }
 
-# The published SHA256SUMS lists names with a ./ prefix, and macOS shasum has no
-# --ignore-missing, so neither `sha256sum -c` nor `shasum -c` can check a single
-# file straight out of it. Pull out the one line that matters and compare the
-# digests as text instead.
+# SHA256SUMS covers every published archive, so a plain `-c` run fails on the
+# three this machine did not download. GNU coreutils and macOS shasum both take
+# --ignore-missing for that, but busybox -- Alpine, and most minimal images --
+# has no such flag. Pulling out the one line that matters and comparing the
+# digests as text works on all three, and can report both hashes when they
+# differ.
 verify() {
     path="$1"
     sums="$2"
