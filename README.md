@@ -4,6 +4,9 @@ Coordinates the `docker` CLI to back up and restore volumes, images and containe
 filesystems. The output is a plain folder with a `manifest.json`, so anything it
 writes can also be restored by hand.
 
+**[Read the manual](https://docker-backup.readthedocs.io/)** for installation,
+a quickstart, and full guides to backing up and restoring.
+
 ## Install
 
 Download the archive for your platform from the [latest

@@ -1,0 +1,88 @@
+site_name: docker-backup
+site_description: Back up and restore docker volumes, images and container filesystems.
+site_url: https://docker-backup.readthedocs.io/
+site_author: Jon Trigueiro
+copyright: Copyright &copy; 2026 Jon Trigueiro — GPLv3 or later
+
+repo_url: https://github.com/joepreludian/docker-backup
+repo_name: joepreludian/docker-backup
+edit_uri: edit/main/docs/manual/docs/
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  features:
+    - content.action.edit
+    - content.code.copy
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.suggest
+    - toc.follow
+
+nav:
+  - Introduction: index.md
+  - Installation: install.md
+  - Quickstart: quickstart.md
+  - How to back up: backup.md
+  - How to restore: restore.md
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  # Mermaid is rendered by Material's built-in integration, not by a separate
+  # plugin: the theme already ships it, and two renderers would both try to
+  # claim the ```mermaid fence.
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+
+# Turn link and nav mistakes into warnings, which fail_on_warning promotes to
+# build failures on ReadTheDocs.
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn

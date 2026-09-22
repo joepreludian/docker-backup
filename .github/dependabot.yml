@@ -11,3 +11,10 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+
+  # Documentation toolchain only; nothing here affects the crate.
+  - package-ecosystem: pip
+    directory: "/docs/manual"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

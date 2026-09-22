@@ -1,0 +1,4 @@
+# Pinned so a ReadTheDocs build is reproducible. Dependabot bumps this
+# (see .github/dependabot.yml); mkdocs and pymdown-extensions come in
+# transitively as dependencies of the theme.
+mkdocs-material==9.7.7
