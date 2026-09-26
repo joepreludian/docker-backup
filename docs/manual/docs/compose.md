@@ -154,7 +154,9 @@ the project name does not affect them.
 The usual rule applies, under the new names: an existing volume is skipped
 unless you pass `--overwrite`, which empties and refills it after a prompt. See
 [Replacing existing volumes](restore.md#overwrite). With `--from-docker-compose`,
-`--overwrite` can only reach the project's own volumes.
+`--overwrite` reaches only the volumes the project uses — but that includes its
+external volumes, even one another project shares. Leave them out of the backup
+with `--no-external` if that is not what you want.
 
 ### From a full backup
 
