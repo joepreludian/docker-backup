@@ -1,0 +1,139 @@
+{
+  "name": "shop",
+  "networks": {
+    "default": {
+      "name": "shop_default",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "api": {
+      "build": {
+        "context": "/work/shop",
+        "dockerfile": "Dockerfile"
+      },
+      "command": null,
+      "entrypoint": null,
+      "image": "registry.example.com/shop/api:1.2",
+      "networks": {
+        "default": null
+      }
+    },
+    "app": {
+      "build": {
+        "context": "/work/shop",
+        "dockerfile": "Dockerfile"
+      },
+      "command": null,
+      "entrypoint": null,
+      "networks": {
+        "default": null
+      },
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "appdata",
+          "target": "/data",
+          "volume": {}
+        },
+        {
+          "type": "bind",
+          "source": "/work/shop/local",
+          "target": "/local",
+          "bind": {}
+        },
+        {
+          "type": "volume",
+          "target": "/anon",
+          "volume": {}
+        }
+      ]
+    },
+    "cache": {
+      "command": null,
+      "entrypoint": null,
+      "image": "docker.io/library/redis:7",
+      "networks": {
+        "default": null
+      },
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "cachedata",
+          "target": "/data",
+          "volume": {}
+        }
+      ]
+    },
+    "db": {
+      "command": null,
+      "entrypoint": null,
+      "image": "postgres:17",
+      "networks": {
+        "default": null
+      },
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "pgdata",
+          "target": "/var/lib/postgresql/data",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "shared",
+          "target": "/shared",
+          "volume": {}
+        }
+      ]
+    },
+    "tools": {
+      "profiles": [
+        "debug"
+      ],
+      "command": null,
+      "entrypoint": null,
+      "image": "nginx",
+      "networks": {
+        "default": null
+      },
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "debugdata",
+          "target": "/d",
+          "volume": {}
+        }
+      ]
+    },
+    "worker": {
+      "build": {
+        "context": "/work/shop",
+        "dockerfile": "Dockerfile"
+      },
+      "command": null,
+      "entrypoint": null,
+      "networks": {
+        "default": null
+      }
+    }
+  },
+  "volumes": {
+    "appdata": {
+      "name": "shop_appdata"
+    },
+    "cachedata": {
+      "name": "shop_cachedata"
+    },
+    "debugdata": {
+      "name": "shop_debugdata"
+    },
+    "pgdata": {
+      "name": "shop-pg-custom"
+    },
+    "shared": {
+      "name": "company-shared",
+      "external": true
+    }
+  }
+}

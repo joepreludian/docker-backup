@@ -1,3 +1,4 @@
+pub mod compose;
 pub mod error;
 pub mod manifest;
 pub mod naming;
