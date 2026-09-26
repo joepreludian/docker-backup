@@ -23,7 +23,7 @@ Or download the archive for your platform from the [latest
 release](https://github.com/joepreludian/docker-backup/releases/latest), verify
 it, and put the binary on your PATH:
 
-    VERSION=0.3.0
+    VERSION=0.4.0
     TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin,
                                   # x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
     BASE=https://github.com/joepreludian/docker-backup/releases/download/v$VERSION
