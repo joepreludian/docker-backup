@@ -11,6 +11,7 @@ use crate::application::ports::Clock;
 use crate::application::restore::RestoreService;
 use crate::cli::{Cli, Command};
 use crate::domain::error::AppResult;
+use crate::domain::report::Info;
 use crate::infrastructure::clock::SystemClock;
 use crate::infrastructure::confirm::TerminalConfirm;
 use crate::infrastructure::docker_cli::DockerCli;
@@ -89,9 +90,12 @@ pub fn run() -> i32 {
         }
         Command::Info(args) => InfoService { store: &store }
             .run(&args.source)
-            .and_then(|report| {
-                renderer.render_info(&report, &mut stdout)?;
-                Ok(report.exit_code())
+            .and_then(|info| {
+                match &info {
+                    Info::Backup(report) => renderer.render_info(report, &mut stdout)?,
+                    Info::Volume(report) => renderer.render_volume_info(report, &mut stdout)?,
+                }
+                Ok(info.exit_code())
             }),
         Command::Doctor => DoctorService {
             docker: &docker,

@@ -5,6 +5,7 @@ pub mod inventory;
 pub mod ports;
 pub mod restore;
 pub mod verify;
+pub mod volume;
 
 #[cfg(test)]
 pub mod fakes;

@@ -8,6 +8,7 @@ use crate::domain::manifest::{Compression, DockerInfo, Manifest, ToolInfo};
 use crate::domain::preview::RestorePreview;
 use crate::domain::refs::ItemKind;
 use crate::domain::verification::VerificationReport;
+use crate::domain::volume_manifest::VolumeManifest;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -139,6 +140,36 @@ impl InfoReport {
     }
 }
 
+/// What `info` found in a single-volume archive (or the folder `tar -xjf` makes of one).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeInfoReport {
+    pub source: PathBuf,
+    pub manifest: VolumeManifest,
+    pub verification: VerificationReport,
+}
+
+impl VolumeInfoReport {
+    pub fn exit_code(&self) -> i32 {
+        if self.verification.is_ok() { 0 } else { 1 }
+    }
+}
+
+/// `info` reads both kinds of backup; each keeps its own report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Info {
+    Backup(InfoReport),
+    Volume(VolumeInfoReport),
+}
+
+impl Info {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Info::Backup(report) => report.exit_code(),
+            Info::Volume(report) => report.exit_code(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolStatus {
     pub name: String,
@@ -191,6 +222,9 @@ impl DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::manifest::Sha256Digest;
+    use crate::domain::verification::{FileCheck, FileStatus};
+    use time::macros::datetime;
 
     #[test]
     fn human_sizes() {
@@ -332,5 +366,51 @@ mod tests {
             info: None,
         });
         assert!(!no_tar.is_healthy());
+    }
+
+    fn file_check(status: FileStatus) -> FileCheck {
+        FileCheck {
+            kind: ItemKind::Volume,
+            name: "pgdata".into(),
+            file: "backup.tar".into(),
+            size_bytes: 2,
+            status,
+        }
+    }
+
+    #[test]
+    fn info_exit_code_follows_verification_for_both_kinds() {
+        let volume = VolumeInfoReport {
+            source: "/b/pgdata-20260926T141500Z.tar.bz2".into(),
+            manifest: VolumeManifest::new(
+                "pgdata",
+                datetime!(2026-09-26 14:15:00 UTC),
+                2,
+                Sha256Digest::of(b"PG"),
+            ),
+            verification: VerificationReport {
+                files: vec![file_check(FileStatus::Ok)],
+            },
+        };
+        assert_eq!(volume.exit_code(), 0);
+        assert_eq!(Info::Volume(volume.clone()).exit_code(), 0);
+
+        let mut missing = volume;
+        missing.verification.files[0].status = FileStatus::Missing;
+        assert_eq!(missing.exit_code(), 1);
+        assert_eq!(Info::Volume(missing).exit_code(), 1);
+
+        let backup = InfoReport {
+            source: "/b".into(),
+            manifest: Manifest::new(
+                datetime!(2026-09-26 14:15:00 UTC),
+                DockerInfo::default(),
+                Compression::None,
+            ),
+            verification: VerificationReport {
+                files: vec![file_check(FileStatus::Missing)],
+            },
+        };
+        assert_eq!(Info::Backup(backup).exit_code(), 1);
     }
 }

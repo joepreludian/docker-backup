@@ -7,7 +7,9 @@ pub mod preview;
 use std::io::{self, Write};
 
 use crate::domain::error::AppError;
-use crate::domain::report::{BackupReport, DoctorReport, InfoReport, RestoreReport};
+use crate::domain::report::{
+    BackupReport, DoctorReport, InfoReport, RestoreReport, VolumeInfoReport,
+};
 
 pub use preview::{format_arch_warning, format_restore_preview};
 
@@ -21,6 +23,7 @@ pub trait Renderer {
     fn render_backup(&self, report: &BackupReport, out: &mut dyn Write) -> io::Result<()>;
     fn render_restore(&self, report: &RestoreReport, out: &mut dyn Write) -> io::Result<()>;
     fn render_info(&self, report: &InfoReport, out: &mut dyn Write) -> io::Result<()>;
+    fn render_volume_info(&self, report: &VolumeInfoReport, out: &mut dyn Write) -> io::Result<()>;
     fn render_doctor(&self, report: &DoctorReport, out: &mut dyn Write) -> io::Result<()>;
     fn render_error(
         &self,
@@ -49,9 +52,10 @@ mod tests {
     use crate::domain::refs::ItemKind;
     use crate::domain::report::{
         BackupReport, ContainerCounts, DoctorReport, ImageCounts, InfoReport, ItemOutcome,
-        ItemResult, RestoreReport, ToolStatus, VolumeCounts,
+        ItemResult, RestoreReport, ToolStatus, VolumeCounts, VolumeInfoReport,
     };
     use crate::domain::verification::{FileCheck, FileStatus, VerificationReport};
+    use crate::domain::volume_manifest::VolumeManifest;
     use serde_json::{Value, json};
     use time::format_description::well_known::Rfc3339;
     use time::macros::datetime;
@@ -330,5 +334,66 @@ mod tests {
         report.manifest.compression = Compression::Bzip2PerFile;
         let text = render_human(|r, out| r.render_info(&report, out));
         assert!(text.contains("bzip2-per-file"));
+    }
+
+    fn volume_info_report() -> VolumeInfoReport {
+        VolumeInfoReport {
+            source: "/b/pgdata-20260926T141500Z.tar.bz2".into(),
+            manifest: VolumeManifest::new(
+                "pgdata",
+                datetime!(2026-09-26 14:15:00 UTC),
+                3,
+                Sha256Digest::of(b"abc"),
+            ),
+            verification: VerificationReport {
+                files: vec![FileCheck {
+                    kind: ItemKind::Volume,
+                    name: "pgdata".into(),
+                    file: "backup.tar".into(),
+                    size_bytes: 3,
+                    status: FileStatus::Ok,
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn json_volume_info_is_tagged_and_full_info_is_not() {
+        let volume = render_json(|r, out| r.render_volume_info(&volume_info_report(), out));
+        assert_eq!(volume["type"], "volume");
+        assert_eq!(volume["source"], "/b/pgdata-20260926T141500Z.tar.bz2");
+        assert_eq!(volume["manifest"]["volume"], "pgdata");
+        assert_eq!(volume["manifest"]["created_at"], "2026-09-26T14:15:00Z");
+        assert_eq!(volume["verification"]["files"][0]["file"], "backup.tar");
+        assert_eq!(volume["verification"]["files"][0]["status"], "ok");
+
+        let full = render_json(|r, out| r.render_info(&info_report(), out));
+        assert!(
+            full.get("type").is_none(),
+            "full-backup info JSON is unchanged"
+        );
+    }
+
+    #[test]
+    fn human_volume_info_shows_the_manifest_and_the_file_table() {
+        let text = render_human(|r, out| r.render_volume_info(&volume_info_report(), out));
+        // A 16-char prefix of the digest: a narrow terminal may wrap the rest.
+        for expected in [
+            "/b/pgdata-20260926T141500Z.tar.bz2",
+            "single volume",
+            "pgdata",
+            "2026-09-26T14:15:00Z",
+            "docker-backup",
+            "3 B",
+            "ba7816bf8f01cfea",
+            "backup.tar",
+            "ok",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+        }
+        assert!(
+            !text.contains("Docker server"),
+            "a volume archive records no daemon"
+        );
     }
 }

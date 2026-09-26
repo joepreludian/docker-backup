@@ -7,9 +7,10 @@ use console::style;
 
 use crate::domain::error::AppError;
 use crate::domain::report::{
-    BackupReport, DoctorReport, InfoReport, ItemOutcome, ItemResult, RestoreReport, human_size,
+    BackupReport, DoctorReport, InfoReport, ItemOutcome, ItemResult, RestoreReport,
+    VolumeInfoReport, human_size,
 };
-use crate::domain::verification::FileStatus;
+use crate::domain::verification::{FileStatus, VerificationReport};
 use crate::presentation::Renderer;
 
 pub struct HumanRenderer {
@@ -79,6 +80,26 @@ impl HumanRenderer {
             ]);
         }
         table
+    }
+
+    /// One row per checked file; both kinds of `info` draw their files with this.
+    fn verification_table(&self, verification: &VerificationReport) -> Table {
+        let mut files = self.table(&["Kind", "Name", "File", "Size", "Status"]);
+        for check in &verification.files {
+            let (label, tone) = match &check.status {
+                FileStatus::Ok => ("ok", Tone::Good),
+                FileStatus::Missing => ("missing", Tone::Bad),
+                FileStatus::Corrupt { .. } => ("corrupt", Tone::Bad),
+            };
+            files.add_row(vec![
+                Cell::new(check.kind.to_string()),
+                Cell::new(check.name.clone()),
+                Cell::new(check.file.clone()),
+                Cell::new(human_size(check.size_bytes)),
+                self.cell(label, tone),
+            ]);
+        }
+        files
     }
 }
 
@@ -165,24 +186,32 @@ impl Renderer for HumanRenderer {
             Cell::new(human_size(m.total_bytes())),
         ]);
         writeln!(out, "{meta}")?;
-
-        let mut files = self.table(&["Kind", "Name", "File", "Size", "Status"]);
-        for check in &report.verification.files {
-            let (label, tone) = match &check.status {
-                FileStatus::Ok => ("ok", Tone::Good),
-                FileStatus::Missing => ("missing", Tone::Bad),
-                FileStatus::Corrupt { .. } => ("corrupt", Tone::Bad),
-            };
-            files.add_row(vec![
-                Cell::new(check.kind.to_string()),
-                Cell::new(check.name.clone()),
-                Cell::new(check.file.clone()),
-                Cell::new(human_size(check.size_bytes)),
-                self.cell(label, tone),
-            ]);
-        }
-        writeln!(out, "{files}")?;
+        writeln!(out, "{}", self.verification_table(&report.verification))?;
         writeln!(out, "{}", report.verification.summary())
+    }
+
+    fn render_volume_info(&self, report: &VolumeInfoReport, out: &mut dyn Write) -> io::Result<()> {
+        let m = &report.manifest;
+        let created = m
+            .created_at
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let mut meta = self.table(&["Field", "Value"]);
+        meta.add_row(vec![
+            Cell::new("Source"),
+            Cell::new(report.source.display().to_string()),
+        ]);
+        meta.add_row(vec![Cell::new("Type"), Cell::new("single volume")]);
+        meta.add_row(vec![Cell::new("Volume"), Cell::new(&m.volume)]);
+        meta.add_row(vec![Cell::new("Created at"), Cell::new(&created)]);
+        meta.add_row(vec![
+            Cell::new("Tool"),
+            Cell::new(format!("{} {}", m.tool.name, m.tool.version)),
+        ]);
+        meta.add_row(vec![Cell::new("Size"), Cell::new(human_size(m.size_bytes))]);
+        meta.add_row(vec![Cell::new("SHA-256"), Cell::new(m.sha256.to_string())]);
+        writeln!(out, "{meta}")?;
+        writeln!(out, "{}", self.verification_table(&report.verification))
     }
 
     fn render_doctor(&self, report: &DoctorReport, out: &mut dyn Write) -> io::Result<()> {

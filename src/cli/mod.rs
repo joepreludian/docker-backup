@@ -44,7 +44,7 @@ pub enum Command {
     Backup(BackupArgs),
     /// Load a backup folder or archive back into the daemon.
     Restore(RestoreArgs),
-    /// Show a backup's manifest and verify its files.
+    /// Show a backup's or a single-volume archive's manifest and verify its files.
     Info(InfoArgs),
     /// Report on the docker daemon and the external tools this program needs.
     Doctor,
@@ -114,7 +114,7 @@ pub struct RestoreArgs {
 
 #[derive(Debug, Args)]
 pub struct InfoArgs {
-    /// Backup folder or .tar.bz2 archive.
+    /// Backup folder, .tar.bz2 archive, or single-volume archive (or its extracted folder).
     pub source: PathBuf,
 }
 
