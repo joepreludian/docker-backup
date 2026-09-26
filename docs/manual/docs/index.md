@@ -126,6 +126,8 @@ for confirmation before making a single change.
   change it.
 - **[How to restore](restore.md)** — the preview, the confirmations, the
   architecture check, and `--overwrite`.
+- **[Single volumes](volumes.md)** — back up one volume into its own archive,
+  and restore it under any name.
 
 ## Licence
 

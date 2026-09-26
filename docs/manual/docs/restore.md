@@ -11,6 +11,12 @@ docker-backup restore <SOURCE> [--overwrite] [--include-volatile]
 `--single-archive`. An archive is unpacked into a temporary directory beside
 itself, which needs roughly twice its size free.
 
+!!! tip "Restoring one volume"
+
+    A single-volume archive from `backup-volume` is restored with
+    [`restore-volume`](volumes.md#restore-a-volume), which can also restore it
+    under another name. `restore` refuses such an archive and says so.
+
 ## What happens, in order
 
 Restore is deliberately front-loaded: everything that can fail cheaply happens

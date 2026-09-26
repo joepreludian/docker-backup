@@ -9,6 +9,11 @@ docker-backup backup [OUTPUT] [--all-images] [--include-volatile]
 `OUTPUT` defaults to `./docker-backup-<UTC timestamp>`, for example
 `docker-backup-20260920T091244Z`.
 
+!!! tip "Just one volume?"
+
+    `backup` always captures the whole daemon. To back up a single volume into
+    its own archive, use [`backup-volume`](volumes.md) instead.
+
 ## What gets captured by default
 
 Running `docker-backup backup ./my-backup` with no other flags captures:
@@ -238,6 +243,9 @@ docker-backup info ./my-backup.tar.bz2
 
 The archive is unpacked into a temporary directory beside itself, so that
 filesystem needs roughly twice the archive's size free.
+
+`info` also reads the single-volume archives that `backup-volume` writes — see
+[Check an archive](volumes.md#check-an-archive).
 
 ## Before you back up stateful services
 

@@ -52,6 +52,8 @@ Requires `docker`, `tar`, and (for bzip2 options) `bzip2` on PATH.
     docker-backup info ./my-backup                         # manifest + hash check
     docker-backup restore ./my-backup                      # shows a preview, asks to confirm
     docker-backup restore ./my-backup --overwrite          # wipes and refills every listed volume
+    docker-backup backup-volume pgdata -o ./volumes        # one volume, one .tar.bz2
+    docker-backup restore-volume ./volumes/pgdata-20260926T141500Z.tar.bz2 --as pgdata-copy
     docker-backup --json doctor | jq .                     # machine-readable output
     docker-backup --json restore ./my-backup --yes         # non-interactive, --json requires --yes
 
@@ -63,7 +65,9 @@ Requires `docker`, `tar`, and (for bzip2 options) `bzip2` on PATH.
     docker-backup restore <BACKUP_DIR | archive.tar.bz2> [--overwrite] [--include-volatile]
                          [--container-tag TAG] [--no-images] [--no-volumes] [--no-containers]
                          [--skip-verify] [--yes | -y] [--force-import-if-arch-mismatch]
-    docker-backup info    <BACKUP_DIR | archive.tar.bz2>
+    docker-backup backup-volume <NAME>... [-o, --output-dir DIR]
+    docker-backup restore-volume <FILE> [--as NAME] [--overwrite] [--yes | -y]
+    docker-backup info    <BACKUP_DIR | archive.tar.bz2 | volume archive>
     docker-backup doctor
 
 Global flags: `--json` (one JSON document on stdout, progress on stderr),
@@ -114,6 +118,16 @@ exist and skips the rest; with it, every existing volume named in the backup
 is emptied and reloaded from the archive. Double-check what a backup contains
 (`docker-backup info`) before restoring it with `--overwrite`.
 
+`backup-volume` writes each named volume to its own
+`<volume>-<UTC timestamp>.tar.bz2` in `--output-dir` (default `.`). Each archive
+is one folder holding the volume's `backup.tar` and a `volume.json` with its
+size and SHA-256. Before writing anything, it checks that every volume exists and
+that no archive would be overwritten. `restore-volume` takes one such archive,
+always verifies it, and restores it into a volume that does not exist yet, under
+its original name or `--as` another. An existing volume is replaced only with
+`--overwrite`, after a prompt (or `--yes`), and only that one volume. `info`
+reads these archives too. See the manual's *Single volumes* page.
+
 ## Backup layout
 
     <dir>/manifest.json
@@ -129,6 +143,12 @@ Manual restore of a volume without this tool:
 
     docker volume create pgdata
     docker run --rm -i -v pgdata:/data alpine:3 tar -C /data -xf - < volumes/pgdata.tar
+
+Single-volume archives (`backup-volume`):
+
+    <dir>/<volume>-<UTC timestamp>.tar.bz2
+        <volume>-<UTC timestamp>/backup.tar
+        <volume>-<UTC timestamp>/volume.json
 
 ## Exit codes
 

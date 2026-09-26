@@ -48,6 +48,7 @@ nav:
   - Quickstart: quickstart.md
   - How to back up: backup.md
   - How to restore: restore.md
+  - Single volumes: volumes.md
 
 markdown_extensions:
   - abbr
