@@ -158,7 +158,10 @@ docker-backup backup ./my-backup --per-file-bzip2
 docker-backup info ./my-backup
 
 <span class="text-slate-400 dark:text-slate-500"># shows a preview, then asks before touching anything</span>
-docker-backup restore ./my-backup</code></pre>
+docker-backup restore ./my-backup
+
+<span class="text-slate-400 dark:text-slate-500"># or just one volume, into its own .tar.bz2</span>
+docker-backup backup-volume pgdata</code></pre>
                 </div>
             </section>
 
@@ -168,7 +171,8 @@ docker-backup restore ./my-backup</code></pre>
                     <div>
                         <h2 class="font-semibold text-slate-900 dark:text-white">Read the documentation</h2>
                         <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                            Installation, a quickstart, and full guides to backing up and restoring.
+                            Installation, a quickstart, and full guides to backing up and restoring,
+                            from the whole daemon down to a single volume.
                         </p>
                     </div>
                     <span

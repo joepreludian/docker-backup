@@ -1,7 +1,8 @@
 # Quickstart
 
-The whole tool is four commands. This page runs through all of them once, in the
-order you would actually use them.
+The whole tool is four commands, plus a pair for working with one volume at a
+time. This page runs through the four once, in the order you would actually use
+them, and then shows the pair.
 
 ```mermaid
 flowchart LR
@@ -125,8 +126,24 @@ archive's size free on that filesystem.
     `restore` notices, lists them, and asks a second time before continuing.
     See [the architecture check](restore.md#the-architecture-check).
 
+## Just one volume
+
+`backup` always takes the whole daemon. For a single volume, `backup-volume`
+writes it into a small archive of its own, and `restore-volume` puts it back —
+under its own name or another one:
+
+```bash
+docker-backup backup-volume pgdata -o ./volumes    # ./volumes/pgdata-<UTC timestamp>.tar.bz2
+docker-backup info ./volumes/pgdata-20260926T141500Z.tar.bz2
+docker-backup restore-volume ./volumes/pgdata-20260926T141500Z.tar.bz2 --as pgdata-copy
+```
+
+Restoring into a volume that does not exist yet asks nothing; replacing one that
+does takes `--overwrite` and a confirmation. See [Single volumes](volumes.md).
+
 ## Next
 
 - [How to back up](backup.md) — selection rules, compression, and layout.
 - [How to restore](restore.md) — the full restore model, including `--overwrite`
   and the architecture check.
+- [Single volumes](volumes.md) — one volume per archive, restored under any name.

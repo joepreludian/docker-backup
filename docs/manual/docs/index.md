@@ -2,7 +2,9 @@
 
 `docker-backup` exports the data living inside a Docker daemon — named volumes,
 locally built images, and whole container filesystems — into one ordinary
-folder, and loads that folder back into a daemon later.
+folder, and loads that folder back into a daemon later. It also works one volume
+at a time: [`backup-volume`](volumes.md) writes a single volume into a small
+archive of its own, which `restore-volume` can put back under any name.
 
 It is a coordinator, not a daemon and not a service. Every operation it
 performs is one you could perform yourself with `docker`, `tar` and patience;
