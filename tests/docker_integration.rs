@@ -24,6 +24,10 @@
 //! compress every volume on the host (per-file or as one combined archive)
 //! and can be slow / large on a host with many or large volumes.
 //!
+//! `single_volume_roundtrip` names only its own `dbk-it-*` volumes:
+//! `backup-volume` exports just that one, and every `restore-volume` targets it
+//! (or a `-copy` of it) by name, so it touches nothing else on the daemon.
+//!
 //! Run with: DOCKER_BACKUP_IT=1 cargo test --test docker_integration -- --ignored --test-threads=1
 
 use std::fs;
@@ -165,6 +169,25 @@ fn restore_json(source: &Path, args: &[&str]) -> Vec<Value> {
         .as_array()
         .cloned()
         .expect("report has an items array")
+}
+
+/// Runs `docker-backup <args> <path>`, asserts it exits successfully, and
+/// returns its `--json` report.
+fn json_report(args: &[&str], path: &Path) -> Value {
+    let output = Bin::cargo_bin("docker-backup")
+        .unwrap()
+        .args(args)
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "docker-backup {:?} {} failed: {}",
+        args,
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("parse json report")
 }
 
 /// Backs up (with `extra_backup_args`, e.g. `--per-file-bzip2`), prunes the
@@ -331,4 +354,83 @@ fn doctor_reports_a_live_daemon() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(value["docker"]["server_version"].as_str().unwrap().len() > 2);
     assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+#[ignore]
+fn single_volume_roundtrip() {
+    if !enabled() {
+        return;
+    }
+    let volume = TestVolume::create("hello from backup-volume");
+    let dir = tempfile::tempdir().unwrap();
+
+    let report = json_report(&["--json", "backup-volume", &volume.0, "-o"], dir.path());
+    let items = report["items"].as_array().expect("report has items");
+    assert_eq!(items.len(), 1, "one archive per volume, got {items:?}");
+    assert_eq!(items[0]["status"], "done");
+    let archive = PathBuf::from(items[0]["file"].as_str().expect("archive path"));
+    let file_name = archive.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        file_name.starts_with(&format!("{}-", volume.0)),
+        "{file_name}"
+    );
+    assert!(file_name.ends_with(".tar.bz2"), "{file_name}");
+
+    let info = json_report(&["--json", "info"], &archive);
+    assert_eq!(info["type"], "volume");
+    assert_eq!(info["manifest"]["volume"], volume.0);
+    assert_eq!(info["verification"]["files"][0]["status"], "ok");
+
+    // Into a volume that does not exist: no prompt, so --json needs no --yes.
+    volume.remove();
+    let restored = json_report(&["--json", "restore-volume"], &archive);
+    assert_eq!(restored["status"], "done");
+    assert_eq!(restored["action"], "create");
+    assert_eq!(restored["target"], volume.0);
+    assert_eq!(volume.read(), "hello from backup-volume");
+
+    // Under another name; the guard removes it even if an assertion fails.
+    let copy = TestVolume(format!("{}-copy", volume.0));
+    let restored = json_report(&["--json", "restore-volume", "--as", &copy.0], &archive);
+    assert_eq!(restored["volume"], volume.0);
+    assert_eq!(restored["target"], copy.0);
+    assert_eq!(copy.read(), "hello from backup-volume");
+
+    // The volume exists now: without --overwrite that is a conflict.
+    Bin::cargo_bin("docker-backup")
+        .unwrap()
+        .arg("restore-volume")
+        .arg(&archive)
+        .assert()
+        .code(2);
+
+    // With --overwrite it is emptied, then refilled: the stray file goes too.
+    docker(&[
+        "run",
+        "--rm",
+        "-v",
+        &format!("{}:/data", volume.0),
+        "alpine:3",
+        "sh",
+        "-c",
+        "printf changed > /data/hello.txt && touch /data/stray",
+    ]);
+    let restored = json_report(
+        &["--json", "restore-volume", "--overwrite", "--yes"],
+        &archive,
+    );
+    assert_eq!(restored["action"], "overwrite");
+    assert_eq!(volume.read(), "hello from backup-volume");
+    let listing = docker(&[
+        "run",
+        "--rm",
+        "-v",
+        &format!("{}:/data:ro", volume.0),
+        "alpine:3",
+        "ls",
+        "-A",
+        "/data",
+    ]);
+    assert_eq!(listing, "hello.txt");
 }
