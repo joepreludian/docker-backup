@@ -76,7 +76,7 @@ four targets. Pick yours, verify it, and put the binary on your `PATH`.
 === "Linux (x86_64)"
 
     ```bash
-    VERSION=0.2.0
+    VERSION=0.3.0
     TARGET=x86_64-unknown-linux-musl
     BASE=https://github.com/joepreludian/docker-backup/releases/download/v$VERSION
 
@@ -90,7 +90,7 @@ four targets. Pick yours, verify it, and put the binary on your `PATH`.
 === "Linux (ARM64)"
 
     ```bash
-    VERSION=0.2.0
+    VERSION=0.3.0
     TARGET=aarch64-unknown-linux-musl
     BASE=https://github.com/joepreludian/docker-backup/releases/download/v$VERSION
 
@@ -104,7 +104,7 @@ four targets. Pick yours, verify it, and put the binary on your `PATH`.
 === "macOS (Apple Silicon)"
 
     ```bash
-    VERSION=0.2.0
+    VERSION=0.3.0
     TARGET=aarch64-apple-darwin
     BASE=https://github.com/joepreludian/docker-backup/releases/download/v$VERSION
 
@@ -118,7 +118,7 @@ four targets. Pick yours, verify it, and put the binary on your `PATH`.
 === "macOS (Intel)"
 
     ```bash
-    VERSION=0.2.0
+    VERSION=0.3.0
     TARGET=x86_64-apple-darwin
     BASE=https://github.com/joepreludian/docker-backup/releases/download/v$VERSION
 
