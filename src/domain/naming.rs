@@ -3,6 +3,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use time::macros::format_description;
+use time::{OffsetDateTime, UtcOffset};
+
 use crate::domain::refs::ImageRef;
 
 pub const ARCHIVE_SUFFIX: &str = ".tar.bz2";
@@ -70,11 +73,27 @@ pub fn archive_path(output: &Path) -> PathBuf {
     }
 }
 
+/// `20260926T141500Z`: the UTC time in default backup names and archive names.
+pub fn utc_stamp(now: OffsetDateTime) -> String {
+    now.to_offset(UtcOffset::UTC)
+        .format(format_description!(
+            "[year][month][day]T[hour][minute][second]Z"
+        ))
+        .expect("static format")
+}
+
+/// `<volume>-<stamp>`: a single-volume archive's name without `.tar.bz2`, and
+/// the one folder inside it.
+pub fn volume_archive_stem(volume: &str, stamp: &str) -> String {
+    format!("{}-{stamp}", sanitize(volume))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::refs::ImageOrigin;
     use std::path::Path;
+    use time::macros::datetime;
 
     fn image(tags: &[&str], id: &str) -> ImageRef {
         ImageRef {
@@ -134,5 +153,29 @@ mod tests {
         );
         assert!(is_archive(Path::new("b.tar.bz2")));
         assert!(!is_archive(Path::new("b")));
+    }
+
+    #[test]
+    fn utc_stamp_is_compact_and_always_utc() {
+        assert_eq!(
+            utc_stamp(datetime!(2026-09-26 14:15:00 UTC)),
+            "20260926T141500Z"
+        );
+        assert_eq!(
+            utc_stamp(datetime!(2026-09-26 16:15:00 +02:00)),
+            "20260926T141500Z"
+        );
+    }
+
+    #[test]
+    fn volume_archive_stem_joins_the_sanitized_name_and_the_stamp() {
+        assert_eq!(
+            volume_archive_stem("pgdata", "20260926T141500Z"),
+            "pgdata-20260926T141500Z"
+        );
+        assert_eq!(
+            volume_archive_stem("a/b", "20260926T141500Z"),
+            "a_b-20260926T141500Z"
+        );
     }
 }

@@ -6,11 +6,11 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use time::OffsetDateTime;
-use time::macros::format_description;
 
 use crate::application::backup::BackupRequest;
 use crate::application::restore::RestoreRequest;
 use crate::domain::manifest::Compression;
+use crate::domain::naming::utc_stamp;
 use crate::domain::plan::{BackupScope, RestorePolicy};
 
 pub use run::run;
@@ -119,12 +119,7 @@ pub struct InfoArgs {
 }
 
 pub fn default_output_name(now: OffsetDateTime) -> String {
-    let stamp = now
-        .format(format_description!(
-            "[year][month][day]T[hour][minute][second]Z"
-        ))
-        .expect("static format");
-    format!("docker-backup-{stamp}")
+    format!("docker-backup-{}", utc_stamp(now))
 }
 
 impl BackupArgs {

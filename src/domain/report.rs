@@ -80,6 +80,16 @@ fn failed_count(items: &[ItemResult]) -> usize {
     items.iter().filter(|i| i.outcome.is_failure()).count()
 }
 
+fn done_bytes(items: &[ItemResult]) -> u64 {
+    items
+        .iter()
+        .map(|i| match i.outcome {
+            ItemOutcome::Done { size_bytes } => size_bytes,
+            _ => 0,
+        })
+        .sum()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupReport {
     pub output: PathBuf,
@@ -95,13 +105,28 @@ impl BackupReport {
     }
 
     pub fn total_bytes(&self) -> u64 {
-        self.items
-            .iter()
-            .map(|i| match i.outcome {
-                ItemOutcome::Done { size_bytes } => size_bytes,
-                _ => 0,
-            })
-            .sum()
+        done_bytes(&self.items)
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        if self.failed_count() > 0 { 1 } else { 0 }
+    }
+}
+
+/// What `backup-volume` wrote: one item per volume, `file` being its archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeBackupReport {
+    pub output_dir: PathBuf,
+    pub items: Vec<ItemResult>,
+}
+
+impl VolumeBackupReport {
+    pub fn failed_count(&self) -> usize {
+        failed_count(&self.items)
+    }
+
+    pub fn total_bytes(&self) -> u64 {
+        done_bytes(&self.items)
     }
 
     pub fn exit_code(&self) -> i32 {
@@ -412,5 +437,40 @@ mod tests {
             },
         };
         assert_eq!(Info::Backup(backup).exit_code(), 1);
+    }
+
+    #[test]
+    fn volume_backup_report_counts_failures_and_bytes() {
+        let mut report = VolumeBackupReport {
+            output_dir: "/b".into(),
+            items: vec![ItemResult {
+                kind: ItemKind::Volume,
+                name: "pgdata".into(),
+                file: Some("/b/pgdata-20260926T141500Z.tar.bz2".into()),
+                outcome: ItemOutcome::Done { size_bytes: 10 },
+            }],
+        };
+        assert_eq!(
+            (
+                report.failed_count(),
+                report.total_bytes(),
+                report.exit_code()
+            ),
+            (0, 10, 0)
+        );
+        report.items.push(ItemResult {
+            kind: ItemKind::Volume,
+            name: "cache".into(),
+            file: None,
+            outcome: ItemOutcome::Failed { error: "x".into() },
+        });
+        assert_eq!(
+            (
+                report.failed_count(),
+                report.total_bytes(),
+                report.exit_code()
+            ),
+            (1, 10, 1)
+        );
     }
 }

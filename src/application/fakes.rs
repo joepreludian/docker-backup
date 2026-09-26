@@ -352,6 +352,8 @@ pub struct MemoryArchiveStore {
     pub packed: RefCell<Vec<(PathBuf, PathBuf)>>,
     pub unpacked: RefCell<Vec<(PathBuf, PathBuf)>>,
     pub fail_pack: Cell<bool>,
+    /// With `fail_pack`, leave a truncated archive behind first, as a failing `tar` can.
+    pub partial_pack: Cell<bool>,
     pub fail_unpack: Cell<bool>,
     temp_counter: RefCell<usize>,
 }
@@ -451,6 +453,9 @@ impl ArchiveStore for MemoryArchiveStore {
 
     fn pack_folder(&self, folder: &Path, archive: &Path) -> AppResult<()> {
         if self.fail_pack.get() {
+            if self.partial_pack.get() {
+                self.put(archive, b"PARTIAL");
+            }
             return Err(AppError::ToolFailed {
                 command: "tar -cjf".into(),
                 stderr: "fake pack failure".into(),
