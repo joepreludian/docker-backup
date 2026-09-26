@@ -7,3 +7,4 @@ pub mod preview;
 pub mod refs;
 pub mod report;
 pub mod verification;
+pub mod volume_manifest;

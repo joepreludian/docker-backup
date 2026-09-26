@@ -294,7 +294,7 @@ impl Manifest {
 const ITEM_DIRS: [&str; 3] = [VOLUMES_DIR, IMAGES_DIR, CONTAINERS_DIR];
 
 /// Docker's own rule for volume and container names: `^[A-Za-z0-9][A-Za-z0-9_.-]*$`.
-fn is_docker_name(name: &str) -> bool {
+pub fn is_docker_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     let starts_well = bytes.next().is_some_and(|b| b.is_ascii_alphanumeric());
     starts_well && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
