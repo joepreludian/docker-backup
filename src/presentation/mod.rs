@@ -8,7 +8,7 @@ use std::io::{self, Write};
 
 use crate::domain::error::AppError;
 use crate::domain::report::{
-    BackupReport, DoctorReport, InfoReport, RestoreReport, VolumeInfoReport,
+    BackupReport, DoctorReport, InfoReport, RestoreReport, VolumeBackupReport, VolumeInfoReport,
 };
 
 pub use preview::{format_arch_warning, format_restore_preview};
@@ -22,6 +22,11 @@ pub enum OutputFormat {
 pub trait Renderer {
     fn render_backup(&self, report: &BackupReport, out: &mut dyn Write) -> io::Result<()>;
     fn render_restore(&self, report: &RestoreReport, out: &mut dyn Write) -> io::Result<()>;
+    fn render_volume_backup(
+        &self,
+        report: &VolumeBackupReport,
+        out: &mut dyn Write,
+    ) -> io::Result<()>;
     fn render_info(&self, report: &InfoReport, out: &mut dyn Write) -> io::Result<()>;
     fn render_volume_info(&self, report: &VolumeInfoReport, out: &mut dyn Write) -> io::Result<()>;
     fn render_doctor(&self, report: &DoctorReport, out: &mut dyn Write) -> io::Result<()>;
@@ -52,7 +57,7 @@ mod tests {
     use crate::domain::refs::ItemKind;
     use crate::domain::report::{
         BackupReport, ContainerCounts, DoctorReport, ImageCounts, InfoReport, ItemOutcome,
-        ItemResult, RestoreReport, ToolStatus, VolumeCounts, VolumeInfoReport,
+        ItemResult, RestoreReport, ToolStatus, VolumeBackupReport, VolumeCounts, VolumeInfoReport,
     };
     use crate::domain::verification::{FileCheck, FileStatus, VerificationReport};
     use crate::domain::volume_manifest::VolumeManifest;
@@ -395,5 +400,58 @@ mod tests {
             !text.contains("Docker server"),
             "a volume archive records no daemon"
         );
+    }
+
+    fn volume_backup_report() -> VolumeBackupReport {
+        VolumeBackupReport {
+            output_dir: "/b".into(),
+            items: vec![
+                ItemResult {
+                    kind: ItemKind::Volume,
+                    name: "pgdata".into(),
+                    file: Some("/b/pgdata-20260926T141500Z.tar.bz2".into()),
+                    outcome: ItemOutcome::Done { size_bytes: 2048 },
+                },
+                ItemResult {
+                    kind: ItemKind::Volume,
+                    name: "cache".into(),
+                    file: None,
+                    outcome: ItemOutcome::Failed {
+                        error: "boom".into(),
+                    },
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn json_volume_backup_is_one_document_with_items() {
+        let value = render_json(|r, out| r.render_volume_backup(&volume_backup_report(), out));
+        assert_eq!(value["output_dir"], "/b");
+        assert_eq!(value["items"][0]["status"], "done");
+        assert_eq!(
+            value["items"][0]["file"],
+            "/b/pgdata-20260926T141500Z.tar.bz2"
+        );
+        assert_eq!(value["items"][0]["size_bytes"], 2048);
+        assert_eq!(value["items"][1]["status"], "failed");
+        assert_eq!(value["items"][1]["error"], "boom");
+    }
+
+    #[test]
+    fn human_volume_backup_shows_status_name_archive_and_size() {
+        let text = render_human(|r, out| r.render_volume_backup(&volume_backup_report(), out));
+        for expected in [
+            "Archives written to /b",
+            "done",
+            "pgdata",
+            "/b/pgdata-20260926T141500Z.tar.bz2",
+            "2.0 KiB",
+            "cache",
+            "failed (boom)",
+            "2 volumes, 1 failed, 2.0 KiB stored",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+        }
     }
 }

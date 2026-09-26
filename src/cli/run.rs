@@ -9,6 +9,7 @@ use crate::application::doctor::DoctorService;
 use crate::application::info::InfoService;
 use crate::application::ports::Clock;
 use crate::application::restore::RestoreService;
+use crate::application::volume::VolumeBackupService;
 use crate::cli::{Cli, Command};
 use crate::domain::error::AppResult;
 use crate::domain::report::Info;
@@ -88,6 +89,17 @@ pub fn run() -> i32 {
                 Ok(report.exit_code())
             })
         }
+        Command::BackupVolume(args) => VolumeBackupService {
+            docker: &docker,
+            store: &store,
+            progress: &progress,
+            clock: &clock,
+        }
+        .run(&args.to_request())
+        .and_then(|report| {
+            renderer.render_volume_backup(&report, &mut stdout)?;
+            Ok(report.exit_code())
+        }),
         Command::Info(args) => InfoService { store: &store }
             .run(&args.source)
             .and_then(|info| {

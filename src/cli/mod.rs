@@ -9,6 +9,7 @@ use time::OffsetDateTime;
 
 use crate::application::backup::BackupRequest;
 use crate::application::restore::RestoreRequest;
+use crate::application::volume::VolumeBackupRequest;
 use crate::domain::manifest::Compression;
 use crate::domain::naming::utc_stamp;
 use crate::domain::plan::{BackupScope, RestorePolicy};
@@ -44,6 +45,8 @@ pub enum Command {
     Backup(BackupArgs),
     /// Load a backup folder or archive back into the daemon.
     Restore(RestoreArgs),
+    /// Export named volumes, each into its own <DIR>/<volume>-<UTC timestamp>.tar.bz2.
+    BackupVolume(BackupVolumeArgs),
     /// Show a backup's or a single-volume archive's manifest and verify its files.
     Info(InfoArgs),
     /// Report on the docker daemon and the external tools this program needs.
@@ -113,6 +116,16 @@ pub struct RestoreArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct BackupVolumeArgs {
+    /// Volumes to back up, one archive each.
+    #[arg(required = true, num_args = 1.., value_name = "NAME")]
+    pub names: Vec<String>,
+    /// Directory the archives are written to; created if missing.
+    #[arg(short = 'o', long, default_value = ".", value_name = "DIR")]
+    pub output_dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
 pub struct InfoArgs {
     /// Backup folder, .tar.bz2 archive, or single-volume archive (or its extracted folder).
     pub source: PathBuf,
@@ -160,6 +173,15 @@ impl RestoreArgs {
                 force_arch_mismatch: self.force_import_if_arch_mismatch,
             },
             verify: !self.skip_verify,
+        }
+    }
+}
+
+impl BackupVolumeArgs {
+    pub fn to_request(&self) -> VolumeBackupRequest {
+        VolumeBackupRequest {
+            names: self.names.clone(),
+            output_dir: self.output_dir.clone(),
         }
     }
 }
@@ -322,5 +344,53 @@ mod tests {
         assert!(cli.json);
         assert_eq!(cli.docker_context.as_deref(), Some("colima"));
         assert_eq!(cli.helper_image, "alpine:3");
+    }
+
+    #[test]
+    fn backup_volume_takes_several_names_and_an_output_dir() {
+        let cli = Cli::try_parse_from([
+            "docker-backup",
+            "backup-volume",
+            "pgdata",
+            "cache",
+            "-o",
+            "/tmp/out",
+        ])
+        .unwrap();
+        let Command::BackupVolume(args) = cli.command else {
+            panic!("expected backup-volume")
+        };
+        let request = args.to_request();
+        assert_eq!(request.names, vec!["pgdata", "cache"]);
+        assert_eq!(request.output_dir, PathBuf::from("/tmp/out"));
+
+        let cli = Cli::try_parse_from([
+            "docker-backup",
+            "backup-volume",
+            "--output-dir",
+            "/tmp/x",
+            "pgdata",
+        ])
+        .unwrap();
+        let Command::BackupVolume(args) = cli.command else {
+            panic!("expected backup-volume")
+        };
+        assert_eq!(args.names, vec!["pgdata"]);
+        assert_eq!(args.output_dir, PathBuf::from("/tmp/x"));
+    }
+
+    #[test]
+    fn backup_volume_writes_to_the_current_directory_by_default() {
+        let cli = Cli::try_parse_from(["docker-backup", "backup-volume", "pgdata"]).unwrap();
+        let Command::BackupVolume(args) = cli.command else {
+            panic!("expected backup-volume")
+        };
+        assert_eq!(args.to_request().output_dir, PathBuf::from("."));
+    }
+
+    #[test]
+    fn backup_volume_requires_a_name() {
+        assert!(Cli::try_parse_from(["docker-backup", "backup-volume"]).is_err());
+        assert!(Cli::try_parse_from(["docker-backup", "backup-volume", "-o", "/tmp/out"]).is_err());
     }
 }

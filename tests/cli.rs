@@ -83,6 +83,7 @@ fn help_lists_all_commands() {
     bin().arg("--help").assert().success().stdout(
         predicate::str::contains("backup")
             .and(predicate::str::contains("restore"))
+            .and(predicate::str::contains("backup-volume"))
             .and(predicate::str::contains("info"))
             .and(predicate::str::contains("doctor")),
     );
@@ -210,4 +211,32 @@ fn info_unpacks_a_single_volume_archive_and_cleans_up() {
         .success()
         .stdout(predicate::str::contains("single volume"));
     assert!(no_scratch_left(dir.path()));
+}
+
+#[test]
+fn backup_volume_without_a_name_is_a_usage_error() {
+    bin()
+        .arg("backup-volume")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("<NAME>"));
+}
+
+#[test]
+fn backup_volume_writes_nothing_when_docker_is_unreachable() {
+    // An unknown context makes docker unreachable without touching any daemon.
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    bin()
+        .args([
+            "--docker-context",
+            "definitely-not-a-context-xyz",
+            "backup-volume",
+            "pgdata",
+            "-o",
+        ])
+        .arg(&out)
+        .assert()
+        .code(3);
+    assert!(!out.exists());
 }

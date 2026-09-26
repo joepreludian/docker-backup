@@ -8,7 +8,7 @@ use console::style;
 use crate::domain::error::AppError;
 use crate::domain::report::{
     BackupReport, DoctorReport, InfoReport, ItemOutcome, ItemResult, RestoreReport,
-    VolumeInfoReport, human_size,
+    VolumeBackupReport, VolumeInfoReport, human_size,
 };
 use crate::domain::verification::{FileStatus, VerificationReport};
 use crate::presentation::Renderer;
@@ -61,12 +61,7 @@ impl HumanRenderer {
     }
 
     fn outcome_cell(&self, outcome: &ItemOutcome) -> Cell {
-        let tone = match outcome {
-            ItemOutcome::Done { .. } | ItemOutcome::Restored => Tone::Good,
-            ItemOutcome::SkippedExisting | ItemOutcome::SkippedVolatile => Tone::Warn,
-            ItemOutcome::SkippedArchMismatch { .. } | ItemOutcome::Failed { .. } => Tone::Bad,
-        };
-        self.cell(&outcome.label(), tone)
+        self.cell(&outcome.label(), outcome_tone(outcome))
     }
 
     fn items_table(&self, items: &[ItemResult]) -> Table {
@@ -110,6 +105,14 @@ enum Tone {
     Bad,
 }
 
+fn outcome_tone(outcome: &ItemOutcome) -> Tone {
+    match outcome {
+        ItemOutcome::Done { .. } | ItemOutcome::Restored => Tone::Good,
+        ItemOutcome::SkippedExisting | ItemOutcome::SkippedVolatile => Tone::Warn,
+        ItemOutcome::SkippedArchMismatch { .. } | ItemOutcome::Failed { .. } => Tone::Bad,
+    }
+}
+
 impl Renderer for HumanRenderer {
     fn render_backup(&self, report: &BackupReport, out: &mut dyn Write) -> io::Result<()> {
         writeln!(out, "Backup written to {}", report.output.display())?;
@@ -132,6 +135,35 @@ impl Renderer for HumanRenderer {
             "{} items, {} failed",
             report.items.len(),
             report.failed_count()
+        )
+    }
+
+    fn render_volume_backup(
+        &self,
+        report: &VolumeBackupReport,
+        out: &mut dyn Write,
+    ) -> io::Result<()> {
+        writeln!(out, "Archives written to {}", report.output_dir.display())?;
+        let mut table = self.table(&["Status", "Volume", "Archive", "Size"]);
+        for item in &report.items {
+            let (status, size) = match &item.outcome {
+                ItemOutcome::Done { size_bytes } => ("done".to_string(), human_size(*size_bytes)),
+                other => (other.label(), "-".to_string()),
+            };
+            table.add_row(vec![
+                self.cell(&status, outcome_tone(&item.outcome)),
+                Cell::new(&item.name),
+                Cell::new(item.file.as_deref().unwrap_or("-")),
+                Cell::new(size),
+            ]);
+        }
+        writeln!(out, "{table}")?;
+        writeln!(
+            out,
+            "{} volumes, {} failed, {} stored",
+            report.items.len(),
+            report.failed_count(),
+            human_size(report.total_bytes())
         )
     }
 
