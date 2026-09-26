@@ -148,6 +148,7 @@ mod tests {
                 name: "app:latest".into(),
                 platform: Platform::new("linux", "amd64"),
             }],
+            compose: None,
         }
     }
 

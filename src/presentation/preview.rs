@@ -175,6 +175,7 @@ mod tests {
                 name: "app:latest".into(),
                 platform: Platform::new("linux", "arm64"),
             }],
+            compose: None,
         }
     }
 

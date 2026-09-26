@@ -8,6 +8,24 @@ use time::OffsetDateTime;
 use crate::domain::platform::Platform;
 use crate::domain::refs::ItemKind;
 
+/// An item that goes back under another name than it was backed up as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Remap {
+    pub kind: ItemKind,
+    pub from: String,
+    pub to: String,
+}
+
+/// The compose side of a `restore --from-docker-compose` preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposePreview {
+    pub project: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_project: Option<String>,
+    pub remaps: Vec<Remap>,
+    pub not_in_backup: Vec<String>,
+}
+
 /// One image or container whose platform doesn't match the restore target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MismatchedItem {
@@ -38,6 +56,9 @@ pub struct RestorePreview {
     /// Every image/container whose platform is known and != target, regardless
     /// of force. An unknown platform can't prove a mismatch, so it's excluded.
     pub mismatches: Vec<MismatchedItem>,
+    /// Set only for `restore --from-docker-compose`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose: Option<ComposePreview>,
 }
 
 impl RestorePreview {

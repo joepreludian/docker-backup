@@ -63,7 +63,7 @@ impl RestoreService<'_> {
             .into_iter()
             .map(|v| v.name)
             .collect();
-        let plan = RestorePlan::build(&manifest, &existing, &request.policy, &target);
+        let plan = RestorePlan::build(&manifest, &existing, &request.policy, &target, None);
         let preview = plan.preview(&manifest, &request.source, &request.policy);
 
         self.confirm.confirm_restore(&preview)?;

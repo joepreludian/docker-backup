@@ -3,11 +3,13 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::domain::compose::{ComposeInfo, ComposeProject, ImageCompose, VolumeCompose};
+use crate::domain::compose::{
+    ComposeInfo, ComposeProject, ComposeRestoreMap, ImageCompose, VolumeCompose,
+};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::manifest::{ContainerEntry, ImageEntry, Manifest, VolumeEntry};
 use crate::domain::platform::Platform;
-use crate::domain::preview::{MismatchedItem, RestorePreview};
+use crate::domain::preview::{ComposePreview, MismatchedItem, Remap, RestorePreview};
 use crate::domain::refs::{ContainerRef, ImageOrigin, ImageRef, ItemKind, VolumeRef};
 
 #[derive(Debug, Clone, Default)]
@@ -274,7 +276,10 @@ pub enum RestoreAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedVolume {
     pub entry: VolumeEntry,
+    /// The volume it goes into: the entry's name unless a compose map renames it.
+    pub target: String,
     pub action: RestoreAction,
+    /// Whether `target` already exists on the daemon.
     pub exists: bool,
 }
 
@@ -283,6 +288,8 @@ pub struct PlannedImage {
     pub entry: ImageEntry,
     pub platform: Platform,
     pub action: RestoreAction,
+    /// Tags added after loading, for `restore --from-docker-compose`.
+    pub extra_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,6 +305,8 @@ pub struct RestorePlan {
     pub images: Vec<PlannedImage>,
     pub containers: Vec<PlannedContainer>,
     pub target: Platform,
+    /// Set for `restore --from-docker-compose`.
+    pub compose: Option<ComposeRestoreMap>,
 }
 
 impl RestorePlan {
@@ -306,13 +315,18 @@ impl RestorePlan {
         existing_volumes: &[String],
         policy: &RestorePolicy,
         target: &Platform,
+        compose: Option<&ComposeRestoreMap>,
     ) -> Self {
         let volumes = if policy.volumes {
             manifest
                 .volumes
                 .iter()
-                .map(|entry| {
-                    let exists = existing_volumes.iter().any(|name| name == &entry.name);
+                .filter_map(|entry| {
+                    let target = match compose {
+                        Some(map) => map.volumes.get(&entry.name)?.clone(),
+                        None => entry.name.clone(),
+                    };
+                    let exists = existing_volumes.contains(&target);
                     let action = if entry.volatile && !policy.include_volatile {
                         RestoreAction::SkipVolatile
                     } else if exists && !policy.overwrite {
@@ -320,11 +334,12 @@ impl RestorePlan {
                     } else {
                         RestoreAction::Restore
                     };
-                    PlannedVolume {
+                    Some(PlannedVolume {
                         entry: entry.clone(),
+                        target,
                         action,
                         exists,
-                    }
+                    })
                 })
                 .collect()
         } else {
@@ -334,20 +349,26 @@ impl RestorePlan {
             manifest
                 .images
                 .iter()
-                .map(|entry| {
+                .filter_map(|entry| {
+                    let extra_tags = match compose {
+                        Some(map) => map.images.get(&entry.reference)?.clone(),
+                        None => Vec::new(),
+                    };
                     let platform = manifest.image_platform(entry);
                     let action = arch_action(&platform, target, policy);
-                    PlannedImage {
+                    Some(PlannedImage {
                         entry: entry.clone(),
                         platform,
                         action,
-                    }
+                        extra_tags,
+                    })
                 })
                 .collect()
         } else {
             Vec::new()
         };
-        let containers = if policy.containers {
+        // `compose up` recreates containers; a compose restore never imports them.
+        let containers = if policy.containers && compose.is_none() {
             manifest
                 .containers
                 .iter()
@@ -369,6 +390,7 @@ impl RestorePlan {
             images,
             containers,
             target: target.clone(),
+            compose: compose.cloned(),
         }
     }
 
@@ -432,6 +454,8 @@ impl RestorePlan {
             }
         }
 
+        let compose = self.compose.as_ref().map(|map| self.compose_preview(map));
+
         RestorePreview {
             source: source.to_path_buf(),
             created_at: manifest.created_at,
@@ -445,6 +469,33 @@ impl RestorePlan {
             images_to_load,
             containers_to_import,
             mismatches,
+            compose,
+        }
+    }
+
+    /// Where items go under other names, and which project volumes the backup lacks.
+    fn compose_preview(&self, map: &ComposeRestoreMap) -> ComposePreview {
+        let volumes = self
+            .volumes
+            .iter()
+            .filter(|v| v.target != v.entry.name)
+            .map(|v| Remap {
+                kind: ItemKind::Volume,
+                from: v.entry.name.clone(),
+                to: v.target.clone(),
+            });
+        let images = self.images.iter().flat_map(|i| {
+            i.extra_tags.iter().map(|tag| Remap {
+                kind: ItemKind::Image,
+                from: i.entry.reference.clone(),
+                to: tag.clone(),
+            })
+        });
+        ComposePreview {
+            project: map.project.clone(),
+            backup_project: map.backup_project.clone(),
+            remaps: volumes.chain(images).collect(),
+            not_in_backup: map.not_in_backup.clone(),
         }
     }
 
@@ -692,6 +743,86 @@ mod tests {
         );
     }
 
+    fn remap(volumes: &[(&str, &str)], images: &[(&str, &[&str])]) -> ComposeRestoreMap {
+        ComposeRestoreMap {
+            project: "shop2".into(),
+            backup_project: Some("shop".into()),
+            volumes: volumes
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect(),
+            images: images
+                .iter()
+                .map(|(r, t)| (r.to_string(), t.iter().map(|x| x.to_string()).collect()))
+                .collect(),
+            not_in_backup: vec!["shop2_new".into()],
+        }
+    }
+
+    #[test]
+    fn compose_map_filters_and_retargets_restore_items() {
+        let map = remap(
+            &[("pgdata", "shop2_pgdata")],
+            &[("app:latest", &["shop2-app:latest"])],
+        );
+        let plan = RestorePlan::build(
+            &manifest(),
+            &["shop2_pgdata".to_string()],
+            &RestorePolicy::default(),
+            &Platform::new("linux", "amd64"),
+            Some(&map),
+        );
+        assert_eq!(plan.volumes.len(), 1);
+        assert_eq!(plan.volumes[0].target, "shop2_pgdata");
+        assert!(
+            plan.volumes[0].exists,
+            "existence is checked against the target"
+        );
+        assert_eq!(plan.volumes[0].action, RestoreAction::SkipExisting);
+        assert_eq!(plan.images[0].extra_tags, vec!["shop2-app:latest"]);
+        assert!(
+            plan.containers.is_empty(),
+            "compose restores never import containers"
+        );
+
+        let preview = plan.preview(&manifest(), Path::new("/b"), &RestorePolicy::default());
+        let compose = preview.compose.unwrap();
+        assert_eq!(compose.project, "shop2");
+        assert_eq!(compose.backup_project.as_deref(), Some("shop"));
+        assert_eq!(
+            compose.remaps,
+            vec![
+                Remap {
+                    kind: ItemKind::Volume,
+                    from: "pgdata".into(),
+                    to: "shop2_pgdata".into()
+                },
+                Remap {
+                    kind: ItemKind::Image,
+                    from: "app:latest".into(),
+                    to: "shop2-app:latest".into()
+                },
+            ]
+        );
+        assert_eq!(compose.not_in_backup, vec!["shop2_new"]);
+    }
+
+    #[test]
+    fn without_a_compose_map_targets_are_the_entry_names() {
+        let plan = RestorePlan::build(
+            &manifest(),
+            &[],
+            &RestorePolicy::default(),
+            &Platform::new("linux", "amd64"),
+            None,
+        );
+        assert!(plan.volumes.iter().all(|v| v.target == v.entry.name));
+        assert!(plan.images.iter().all(|i| i.extra_tags.is_empty()));
+        assert_eq!(plan.containers.len(), 1);
+        let preview = plan.preview(&manifest(), Path::new("/b"), &RestorePolicy::default());
+        assert!(preview.compose.is_none());
+    }
+
     #[test]
     fn full_scope_has_no_compose_plan() {
         let plan = BackupPlan::build(&inventory(), &BackupScope::default()).unwrap();
@@ -847,6 +978,7 @@ mod tests {
             &["cache".to_string()],
             &RestorePolicy::default(),
             &Platform::new("linux", "amd64"),
+            None,
         );
         let actions: Vec<(&str, RestoreAction, bool)> = plan
             .volumes
@@ -873,6 +1005,7 @@ mod tests {
             &["cache".to_string()],
             &policy,
             &Platform::new("linux", "amd64"),
+            None,
         );
         assert!(
             plan.volumes
@@ -890,7 +1023,13 @@ mod tests {
             containers: false,
             ..RestorePolicy::default()
         };
-        let plan = RestorePlan::build(&manifest(), &[], &policy, &Platform::new("linux", "amd64"));
+        let plan = RestorePlan::build(
+            &manifest(),
+            &[],
+            &policy,
+            &Platform::new("linux", "amd64"),
+            None,
+        );
         assert_eq!(plan.len(), 0);
     }
 
@@ -898,7 +1037,7 @@ mod tests {
     fn images_on_another_arch_are_skipped_unless_forced() {
         let m = manifest();
         let arm = Platform::new("linux", "arm64");
-        let plan = RestorePlan::build(&m, &[], &RestorePolicy::default(), &arm);
+        let plan = RestorePlan::build(&m, &[], &RestorePolicy::default(), &arm, None);
         assert_eq!(plan.images[0].action, RestoreAction::SkipArchMismatch);
         assert_eq!(
             plan.containers[0].action,
@@ -910,7 +1049,7 @@ mod tests {
             force_arch_mismatch: true,
             ..RestorePolicy::default()
         };
-        let plan = RestorePlan::build(&m, &[], &forced, &arm);
+        let plan = RestorePlan::build(&m, &[], &forced, &arm, None);
         assert_eq!(plan.images[0].action, RestoreAction::Restore);
         assert_eq!(plan.containers[0].action, RestoreAction::Restore);
     }
@@ -947,7 +1086,7 @@ mod tests {
 
         let target = Platform::new("linux", "arm64");
         let policy = RestorePolicy::default();
-        let plan = RestorePlan::build(&m, &[], &policy, &target);
+        let plan = RestorePlan::build(&m, &[], &policy, &target, None);
         assert_eq!(
             plan.images[0].action,
             RestoreAction::Restore,
@@ -970,6 +1109,7 @@ mod tests {
             &[],
             &RestorePolicy::default(),
             &Platform::new("linux", "amd64"),
+            None,
         );
         assert!(
             plan.images
@@ -991,7 +1131,7 @@ mod tests {
             overwrite: true,
             ..RestorePolicy::default()
         };
-        let plan = RestorePlan::build(&m, &["pgdata".into()], &policy, &arm);
+        let plan = RestorePlan::build(&m, &["pgdata".into()], &policy, &arm, None);
         let preview = plan.preview(&m, Path::new("/b"), &policy);
         assert_eq!(preview.backup_platform, Platform::new("linux", "amd64"));
         assert_eq!(preview.target_platform, arm);
@@ -1007,7 +1147,7 @@ mod tests {
             force_arch_mismatch: true,
             ..policy
         };
-        let plan = RestorePlan::build(&m, &[], &forced, &arm);
+        let plan = RestorePlan::build(&m, &[], &forced, &arm, None);
         let preview = plan.preview(&m, Path::new("/b"), &forced);
         assert_eq!(preview.images_to_load, 1);
         assert_eq!(
