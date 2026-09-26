@@ -112,6 +112,7 @@ impl VolumeBackupService<'_> {
             items.push(ItemResult {
                 kind: ItemKind::Volume,
                 name: planned.volume.to_string(),
+                target: None,
                 file,
                 outcome,
             });

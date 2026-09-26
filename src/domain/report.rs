@@ -83,6 +83,10 @@ pub fn human_size(bytes: u64) -> String {
 pub struct ItemResult {
     pub kind: ItemKind,
     pub name: String,
+    /// Where the item went when that differs from `name` (a compose restore
+    /// into a renamed project).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     pub file: Option<String>,
     #[serde(flatten)]
     pub outcome: ItemOutcome,
@@ -371,6 +375,7 @@ mod tests {
         let json = serde_json::to_value(ItemResult {
             kind: ItemKind::Image,
             name: "a".into(),
+            target: None,
             file: None,
             outcome: ItemOutcome::Done { size_bytes: 3 },
         })
@@ -392,6 +397,7 @@ mod tests {
             items: vec![ItemResult {
                 kind: ItemKind::Volume,
                 name: "v".into(),
+                target: None,
                 file: Some("volumes/v.tar".into()),
                 outcome: ItemOutcome::Done { size_bytes: 10 },
             }],
@@ -402,6 +408,7 @@ mod tests {
         failed.items.push(ItemResult {
             kind: ItemKind::Image,
             name: "i".into(),
+            target: None,
             file: None,
             outcome: ItemOutcome::Failed { error: "x".into() },
         });
@@ -506,6 +513,7 @@ mod tests {
             items: vec![ItemResult {
                 kind: ItemKind::Volume,
                 name: "pgdata".into(),
+                target: None,
                 file: Some("/b/pgdata-20260926T141500Z.tar.bz2".into()),
                 outcome: ItemOutcome::Done { size_bytes: 10 },
             }],
@@ -521,6 +529,7 @@ mod tests {
         report.items.push(ItemResult {
             kind: ItemKind::Volume,
             name: "cache".into(),
+            target: None,
             file: None,
             outcome: ItemOutcome::Failed { error: "x".into() },
         });

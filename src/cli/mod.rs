@@ -193,6 +193,7 @@ impl RestoreArgs {
                 force_arch_mismatch: self.force_import_if_arch_mismatch,
             },
             verify: !self.skip_verify,
+            compose_files: None,
         }
     }
 }

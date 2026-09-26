@@ -287,6 +287,7 @@ impl BackupService<'_> {
             items.push(ItemResult {
                 kind: *kind,
                 name: name.clone(),
+                target: None,
                 file: None,
                 outcome,
             });
@@ -375,6 +376,7 @@ impl BackupService<'_> {
         Ok(ItemResult {
             kind,
             name: name.to_string(),
+            target: None,
             file,
             outcome,
         })

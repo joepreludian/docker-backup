@@ -86,12 +86,14 @@ mod tests {
                 ItemResult {
                     kind: ItemKind::Volume,
                     name: "pgdata".into(),
+                    target: None,
                     file: Some("volumes/pgdata.tar".into()),
                     outcome: ItemOutcome::Done { size_bytes: 2048 },
                 },
                 ItemResult {
                     kind: ItemKind::Image,
                     name: "app:latest".into(),
+                    target: None,
                     file: None,
                     outcome: ItemOutcome::Failed {
                         error: "boom".into(),
@@ -268,6 +270,7 @@ mod tests {
             items: vec![ItemResult {
                 kind: ItemKind::Volume,
                 name: "v".into(),
+                target: None,
                 file: None,
                 outcome: ItemOutcome::SkippedExisting,
             }],
@@ -419,12 +422,14 @@ mod tests {
                 ItemResult {
                     kind: ItemKind::Volume,
                     name: "pgdata".into(),
+                    target: None,
                     file: Some("/b/pgdata-20260926T141500Z.tar.bz2".into()),
                     outcome: ItemOutcome::Done { size_bytes: 2048 },
                 },
                 ItemResult {
                     kind: ItemKind::Volume,
                     name: "cache".into(),
+                    target: None,
                     file: None,
                     outcome: ItemOutcome::Failed {
                         error: "boom".into(),

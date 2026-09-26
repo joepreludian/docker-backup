@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use crate::application::ports::{ArchiveStore, ConfirmPort, DockerPort, Operation, ProgressSink};
 use crate::application::verify::{locate_backup, read_manifest, verify_files};
+use crate::domain::compose::{ComposeProject, ComposeRestoreMap};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::manifest::{Compression, MANIFEST_FILE};
-use crate::domain::plan::{RestoreAction, RestorePlan, RestorePolicy};
+use crate::domain::plan::{PlannedImage, RestoreAction, RestorePlan, RestorePolicy};
 use crate::domain::refs::ItemKind;
 use crate::domain::report::{ItemOutcome, ItemResult, RestoreReport};
 use crate::domain::volume_manifest::VOLUME_MANIFEST_FILE;
@@ -16,6 +17,8 @@ pub struct RestoreRequest {
     pub source: PathBuf,
     pub policy: RestorePolicy,
     pub verify: bool,
+    /// `--from-docker-compose`: restore only what that project uses, under its current names.
+    pub compose_files: Option<Vec<PathBuf>>,
 }
 
 pub struct RestoreService<'a> {
@@ -27,13 +30,26 @@ pub struct RestoreService<'a> {
 
 impl RestoreService<'_> {
     pub fn run(&self, request: &RestoreRequest) -> AppResult<RestoreReport> {
+        // Rendered first: a bad compose file fails in a second, before any
+        // archive is unpacked or hashed.
+        let project = match &request.compose_files {
+            Some(files) => Some(ComposeProject::from_config(
+                &self.docker.compose_config(files)?,
+            )?),
+            None => None,
+        };
         let located = locate_backup(self.store, &request.source)?;
-        let result = self.run_in(&located.root, request);
+        let result = self.run_in(&located.root, request, project.as_ref());
         located.cleanup(self.store);
         result
     }
 
-    fn run_in(&self, root: &Path, request: &RestoreRequest) -> AppResult<RestoreReport> {
+    fn run_in(
+        &self,
+        root: &Path,
+        request: &RestoreRequest,
+        project: Option<&ComposeProject>,
+    ) -> AppResult<RestoreReport> {
         if !self.store.exists(&root.join(MANIFEST_FILE))
             && self.store.exists(&root.join(VOLUME_MANIFEST_FILE))
         {
@@ -53,6 +69,10 @@ impl RestoreService<'_> {
             }
         }
 
+        let compose = project
+            .map(|project| ComposeRestoreMap::build(&manifest, project, &request.source))
+            .transpose()?;
+
         let info = self.docker.engine_info()?;
         info.require_platform()?;
         let target = info.platform();
@@ -63,7 +83,13 @@ impl RestoreService<'_> {
             .into_iter()
             .map(|v| v.name)
             .collect();
-        let plan = RestorePlan::build(&manifest, &existing, &request.policy, &target, None);
+        let plan = RestorePlan::build(
+            &manifest,
+            &existing,
+            &request.policy,
+            &target,
+            compose.as_ref(),
+        );
         let preview = plan.preview(&manifest, &request.source, &request.policy);
 
         self.confirm.confirm_restore(&preview)?;
@@ -87,7 +113,13 @@ impl RestoreService<'_> {
         for planned in &plan.volumes {
             index += 1;
             let name = planned.entry.name.as_str();
-            self.progress.item_started(ItemKind::Volume, name, index);
+            let target = planned.target.as_str();
+            let label = if target == name {
+                name.to_string()
+            } else {
+                format!("{name} → {target}")
+            };
+            self.progress.item_started(ItemKind::Volume, &label, index);
             let outcome = match planned.action {
                 RestoreAction::SkipExisting => ItemOutcome::SkippedExisting,
                 RestoreAction::SkipVolatile => ItemOutcome::SkippedVolatile,
@@ -95,7 +127,7 @@ impl RestoreService<'_> {
                     root,
                     &planned.entry.file,
                     compression,
-                    name,
+                    target,
                     planned.exists,
                     request.policy.overwrite,
                 ),
@@ -106,10 +138,11 @@ impl RestoreService<'_> {
                 },
             };
             self.progress
-                .item_finished(ItemKind::Volume, name, &outcome);
+                .item_finished(ItemKind::Volume, &label, &outcome);
             items.push(ItemResult {
                 kind: ItemKind::Volume,
                 name: name.to_string(),
+                target: (target != name).then(|| target.to_string()),
                 file: Some(planned.entry.file.clone()),
                 outcome,
             });
@@ -120,11 +153,7 @@ impl RestoreService<'_> {
             self.progress
                 .item_started(ItemKind::Image, &image.entry.reference, index);
             let outcome = match image.action {
-                RestoreAction::Restore => to_outcome(
-                    self.store
-                        .open_item(&root.join(&image.entry.file), compression)
-                        .and_then(|mut reader| self.docker.load_image(&mut reader)),
-                ),
+                RestoreAction::Restore => self.restore_image(root, compression, image),
                 RestoreAction::SkipArchMismatch => ItemOutcome::SkippedArchMismatch {
                     platform: image.platform.to_string(),
                     target: target.to_string(),
@@ -140,6 +169,7 @@ impl RestoreService<'_> {
             items.push(ItemResult {
                 kind: ItemKind::Image,
                 name: image.entry.reference.clone(),
+                target: None,
                 file: Some(image.entry.file.clone()),
                 outcome,
             });
@@ -176,6 +206,7 @@ impl RestoreService<'_> {
             items.push(ItemResult {
                 kind: ItemKind::Container,
                 name: container.entry.name.clone(),
+                target: None,
                 file: Some(container.entry.file.clone()),
                 outcome,
             });
@@ -187,6 +218,35 @@ impl RestoreService<'_> {
             preview: Some(preview),
             items,
         })
+    }
+
+    /// Load the image, then add the tags a compose restore asks for.
+    fn restore_image(
+        &self,
+        root: &Path,
+        compression: Compression,
+        image: &PlannedImage,
+    ) -> ItemOutcome {
+        let loaded = self
+            .store
+            .open_item(&root.join(&image.entry.file), compression)
+            .and_then(|mut reader| self.docker.load_image(&mut reader));
+        if let Err(error) = loaded {
+            return ItemOutcome::Failed {
+                error: error.to_string(),
+            };
+        }
+        for tag in &image.extra_tags {
+            if let Err(error) = self.docker.tag_image(&image.entry.reference, tag) {
+                return ItemOutcome::Failed {
+                    error: format!(
+                        "loaded, but tagging {} as {tag} failed: {error}",
+                        image.entry.reference
+                    ),
+                };
+            }
+        }
+        ItemOutcome::Restored
     }
 
     fn restore_volume(
@@ -225,6 +285,7 @@ mod tests {
     use crate::application::fakes::{
         FakeConfirm, FakeDocker, MemoryArchiveStore, RecordingProgress,
     };
+    use crate::domain::compose::{ComposeInfo, ImageCompose, VolumeCompose};
     use crate::domain::manifest::{
         Compression, ContainerEntry, DockerInfo, ImageEntry, MANIFEST_FILE, Manifest, Sha256Digest,
         VolumeEntry,
@@ -297,7 +358,212 @@ mod tests {
             source: PathBuf::from("/b"),
             policy,
             verify: true,
+            compose_files: None,
         }
+    }
+
+    /// A compose backup at /c made from project `shop`: one volume, one image
+    /// that services `app` and `worker` share.
+    fn seed_compose(store: &MemoryArchiveStore) {
+        let mut m = Manifest::new(
+            datetime!(2026-09-26 00:00:00 UTC),
+            DockerInfo {
+                os: "linux".into(),
+                arch: "arm64".into(),
+                ..Default::default()
+            },
+            Compression::None,
+        );
+        m.compose = Some(ComposeInfo {
+            project: "shop".into(),
+            files: vec!["docker-compose.yml".into()],
+        });
+        store.put("/c/volumes/shop_appdata.tar", b"APPDATA");
+        m.volumes.push(VolumeEntry {
+            name: "shop_appdata".into(),
+            file: "volumes/shop_appdata.tar".into(),
+            size_bytes: 7,
+            sha256: Sha256Digest::of(b"APPDATA"),
+            volatile: false,
+            inspect: json!({}),
+            compose: Some(VolumeCompose {
+                key: "appdata".into(),
+                external: false,
+            }),
+        });
+        store.put("/c/images/shop-app_latest.tar", b"APPIMAGE");
+        m.images.push(ImageEntry {
+            reference: "shop-app:latest".into(),
+            id: "sha256:1".into(),
+            file: "images/shop-app_latest.tar".into(),
+            size_bytes: 8,
+            sha256: Sha256Digest::of(b"APPIMAGE"),
+            origin: ImageOrigin::Built,
+            platform: Some(Platform::new("linux", "arm64")),
+            inspect: json!({}),
+            compose: Some(ImageCompose {
+                services: vec!["app".into(), "worker".into()],
+            }),
+        });
+        store
+            .write_text(&Path::new("/c").join(MANIFEST_FILE), &m.to_json().unwrap())
+            .unwrap();
+    }
+
+    /// The fixture project rendered from a folder named `shop2`.
+    fn shop2_config() -> serde_json::Value {
+        serde_json::from_str(
+            &include_str!("../../tests/fixtures/compose/shop.json")
+                .replace("\"name\": \"shop\"", "\"name\": \"shop2\"")
+                .replace("shop_", "shop2_"),
+        )
+        .unwrap()
+    }
+
+    fn compose_request() -> RestoreRequest {
+        RestoreRequest {
+            source: PathBuf::from("/c"),
+            compose_files: Some(vec![PathBuf::from("docker-compose.yml")]),
+            ..request(RestorePolicy::default())
+        }
+    }
+
+    #[test]
+    fn compose_restore_remaps_volumes_and_tags_images_for_a_renamed_project() {
+        let store = MemoryArchiveStore::new();
+        seed_compose(&store);
+        let docker = FakeDocker::default().with_compose(shop2_config());
+        let (progress, confirm) = (RecordingProgress::default(), FakeConfirm::accepting());
+        let report = run(&docker, &store, &progress, &confirm, &compose_request()).unwrap();
+
+        assert_eq!(docker.volumes.borrow()["shop2_appdata"], b"APPDATA");
+        assert!(!docker.volumes.borrow().contains_key("shop_appdata"));
+        assert_eq!(
+            *docker.tagged.borrow(),
+            vec![
+                (
+                    "shop-app:latest".to_string(),
+                    "shop2-app:latest".to_string()
+                ),
+                (
+                    "shop-app:latest".to_string(),
+                    "shop2-worker:latest".to_string()
+                ),
+            ]
+        );
+        assert_eq!(report.items[0].name, "shop_appdata");
+        assert_eq!(report.items[0].target.as_deref(), Some("shop2_appdata"));
+        assert_eq!(report.items[0].outcome, ItemOutcome::Restored);
+        assert_eq!(report.items[1].target, None);
+        assert_eq!(report.items[1].outcome, ItemOutcome::Restored);
+        assert_eq!(report.exit_code(), 0);
+        assert!(
+            progress
+                .events
+                .borrow()
+                .iter()
+                .any(|e| e.contains("shop_appdata → shop2_appdata")),
+            "{:?}",
+            progress.events.borrow()
+        );
+
+        let preview = confirm.previews.borrow()[0].clone();
+        let compose = preview.compose.unwrap();
+        assert_eq!(compose.project, "shop2");
+        assert_eq!(compose.backup_project.as_deref(), Some("shop"));
+        assert_eq!(compose.remaps.len(), 3);
+        assert!(
+            compose
+                .not_in_backup
+                .contains(&"shop2_cachedata".to_string())
+        );
+    }
+
+    #[test]
+    fn compose_restore_skips_an_existing_target_without_overwrite() {
+        let store = MemoryArchiveStore::new();
+        seed_compose(&store);
+        let docker = FakeDocker::default()
+            .with_compose(shop2_config())
+            .with_volume("shop2_appdata", b"LIVE");
+        let (progress, confirm) = (RecordingProgress::default(), FakeConfirm::accepting());
+        let report = run(&docker, &store, &progress, &confirm, &compose_request()).unwrap();
+        assert_eq!(report.items[0].outcome, ItemOutcome::SkippedExisting);
+        assert_eq!(docker.volumes.borrow()["shop2_appdata"], b"LIVE");
+    }
+
+    #[test]
+    fn compose_is_rendered_before_the_backup_is_read() {
+        let store = MemoryArchiveStore::new();
+        seed_compose(&store);
+        store.put("/c/volumes/shop_appdata.tar", b"CORRUPTED");
+        let docker = FakeDocker::default()
+            .with_compose(shop2_config())
+            .failing("compose_config");
+        let (progress, confirm) = (RecordingProgress::default(), FakeConfirm::accepting());
+        let err = run(&docker, &store, &progress, &confirm, &compose_request()).unwrap_err();
+        assert!(
+            matches!(err, AppError::Conflict(_)),
+            "compose failure wins over corruption: {err}"
+        );
+    }
+
+    #[test]
+    fn a_failed_tag_fails_the_image_item() {
+        let store = MemoryArchiveStore::new();
+        seed_compose(&store);
+        let docker = FakeDocker::default()
+            .with_compose(shop2_config())
+            .failing("tag:shop2-worker:latest");
+        let (progress, confirm) = (RecordingProgress::default(), FakeConfirm::accepting());
+        let report = run(&docker, &store, &progress, &confirm, &compose_request()).unwrap();
+        let ItemOutcome::Failed { error } = &report.items[1].outcome else {
+            panic!("expected failure, got {:?}", report.items[1].outcome)
+        };
+        assert!(
+            error.starts_with("loaded, but tagging shop-app:latest as shop2-worker:latest failed"),
+            "{error}"
+        );
+        assert_eq!(report.exit_code(), 1);
+    }
+
+    #[test]
+    fn a_full_backup_is_filtered_to_the_project_and_never_imports_containers() {
+        let store = MemoryArchiveStore::new();
+        seed(&store);
+        let docker = FakeDocker::default().with_compose(json!({
+            "name": "p",
+            "services": { "db": { "image": "postgres:17" } },
+            "volumes": { "db": { "name": "pgdata" } }
+        }));
+        let (progress, confirm) = (RecordingProgress::default(), FakeConfirm::accepting());
+        let request = RestoreRequest {
+            compose_files: Some(vec![PathBuf::from("c.yml")]),
+            ..request(RestorePolicy::default())
+        };
+        let report = run(&docker, &store, &progress, &confirm, &request).unwrap();
+        let names: Vec<&str> = report.items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["pgdata"]);
+        assert!(docker.imported_containers.borrow().is_empty());
+        assert!(docker.loaded_images.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_backup_with_nothing_for_the_project_touches_nothing() {
+        let store = MemoryArchiveStore::new();
+        seed(&store);
+        let docker =
+            FakeDocker::default().with_compose(json!({"name": "empty", "volumes": {"x": {}}}));
+        let (progress, confirm) = (RecordingProgress::default(), FakeConfirm::accepting());
+        let request = RestoreRequest {
+            compose_files: Some(vec![PathBuf::from("c.yml")]),
+            ..request(RestorePolicy::default())
+        };
+        let err = run(&docker, &store, &progress, &confirm, &request).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(!docker.calls.borrow().iter().any(|c| {
+            c.starts_with("create_volume") || c.starts_with("import_volume") || c == "load_image"
+        }));
     }
 
     fn run(
