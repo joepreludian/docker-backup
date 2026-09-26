@@ -37,6 +37,11 @@ pub struct FakeDocker {
     pub calls: RefCell<Vec<String>>,
     pub loaded_images: RefCell<Vec<Vec<u8>>>,
     pub imported_containers: RefCell<Vec<(String, Vec<u8>)>>,
+    /// What `compose_config` returns; `None` makes it fail.
+    pub compose: Option<Value>,
+    pub compose_files: RefCell<Vec<Vec<PathBuf>>>,
+    /// `(source, target)` of every `tag_image` call that succeeded.
+    pub tagged: RefCell<Vec<(String, String)>>,
 }
 
 impl Default for FakeDocker {
@@ -60,6 +65,9 @@ impl Default for FakeDocker {
             calls: RefCell::new(Vec::new()),
             loaded_images: RefCell::new(Vec::new()),
             imported_containers: RefCell::new(Vec::new()),
+            compose: None,
+            compose_files: RefCell::new(Vec::new()),
+            tagged: RefCell::new(Vec::new()),
         }
     }
 }
@@ -97,6 +105,26 @@ impl FakeDocker {
         self
     }
 
+    /// One image carrying several tags (e.g. two compose services built from one Dockerfile).
+    pub fn with_image_tags(mut self, tags: &[&str], origin: ImageOrigin, content: &[u8]) -> Self {
+        let id = format!("sha256:{:0>64}", self.images.len() + 1);
+        self.images.push((
+            ImageRef {
+                id,
+                tags: tags.iter().map(|t| t.to_string()).collect(),
+                origin,
+            },
+            content.to_vec(),
+        ));
+        self
+    }
+
+    /// The rendered compose config `compose_config` returns.
+    pub fn with_compose(mut self, config: Value) -> Self {
+        self.compose = Some(config);
+        self
+    }
+
     pub fn with_container(mut self, name: &str, image: &str, content: &[u8]) -> Self {
         let id = format!("c{}", self.containers.len() + 1);
         self.containers.push((
@@ -112,7 +140,8 @@ impl FakeDocker {
     }
 
     /// Make export/save/import of this name (volume, image tag, or container name) fail.
-    /// `create_volume:<name>` makes only the creation of that volume fail.
+    /// `create_volume:<name>` makes only the creation of that volume fail,
+    /// `tag:<target>` only that tag, `compose_config` the compose rendering.
     pub fn failing(mut self, name: &str) -> Self {
         self.fail_on.insert(name.to_string());
         self
@@ -290,6 +319,28 @@ impl DockerPort for FakeDocker {
         self.imported_containers
             .borrow_mut()
             .push((tag.to_string(), content));
+        Ok(())
+    }
+
+    fn compose_config(&self, files: &[PathBuf]) -> AppResult<Value> {
+        self.record("compose_config".into());
+        self.compose_files.borrow_mut().push(files.to_vec());
+        if self.fail_on.contains("compose_config") {
+            return Err(AppError::Conflict(
+                "docker compose config failed: fake failure".into(),
+            ));
+        }
+        self.compose
+            .clone()
+            .ok_or_else(|| AppError::Conflict("no compose project configured".into()))
+    }
+
+    fn tag_image(&self, source: &str, target: &str) -> AppResult<()> {
+        self.record(format!("tag_image:{source}->{target}"));
+        self.check(&format!("tag:{target}"))?;
+        self.tagged
+            .borrow_mut()
+            .push((source.to_string(), target.to_string()));
         Ok(())
     }
 }

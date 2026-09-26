@@ -54,6 +54,10 @@ pub trait DockerPort {
     fn import_volume(&self, name: &str, source: &mut dyn Read, wipe: bool) -> AppResult<()>;
     fn load_image(&self, source: &mut dyn Read) -> AppResult<()>;
     fn import_container_fs(&self, source: &mut dyn Read, tag: &str) -> AppResult<()>;
+    /// `docker compose -f … --profile * config --format json`, parsed.
+    fn compose_config(&self, files: &[PathBuf]) -> AppResult<Value>;
+    /// `docker image tag <source> <target>`.
+    fn tag_image(&self, source: &str, target: &str) -> AppResult<()>;
 }
 
 /// Files on disk (or in memory) that make up a backup folder.

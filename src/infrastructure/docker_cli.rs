@@ -1,6 +1,7 @@
 //! `DockerPort` implemented by shelling out to the `docker` CLI.
 
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 
@@ -281,6 +282,30 @@ pub fn parse_container_lines(text: &str) -> Vec<ContainerRef> {
         .collect()
 }
 
+/// Renders a compose project from its files, layered in order. Every profile is
+/// active so a volume used only by an optional service is not dropped.
+pub fn compose_config_args(files: &[PathBuf]) -> Vec<String> {
+    let mut args = vec!["compose".to_string()];
+    for file in files {
+        args.push("-f".to_string());
+        args.push(file.display().to_string());
+    }
+    args.extend(["--profile", "*", "config", "--format", "json"].map(String::from));
+    args
+}
+
+/// A missing plugin is a missing tool (exit 3); anything else is compose
+/// rejecting the files, which is the user's to fix (exit 2).
+pub fn classify_compose_failure(stderr: &str) -> AppError {
+    if stderr.contains("unknown command: docker compose")
+        || stderr.contains("'compose' is not a docker command")
+    {
+        AppError::ToolMissing("docker compose".into())
+    } else {
+        AppError::Conflict(format!("docker compose config failed: {stderr}"))
+    }
+}
+
 pub fn unique_ids(text: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     text.lines()
@@ -402,6 +427,22 @@ impl DockerPort for DockerCli {
 
     fn import_container_fs(&self, source: &mut dyn Read, tag: &str) -> AppResult<()> {
         self.stream_in(Self::strings(&["import", "-", tag]), source)
+    }
+
+    fn compose_config(&self, files: &[PathBuf]) -> AppResult<Value> {
+        let args = compose_config_args(files);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let raw = self.capture(&args).map_err(|error| match error {
+            AppError::DockerCommandFailed { stderr, .. } => classify_compose_failure(&stderr),
+            other => other,
+        })?;
+        serde_json::from_str(&raw).map_err(|e| {
+            AppError::Conflict(format!("docker compose config returned invalid JSON: {e}"))
+        })
+    }
+
+    fn tag_image(&self, source: &str, target: &str) -> AppResult<()> {
+        self.capture(&["image", "tag", source, target]).map(|_| ())
     }
 }
 
@@ -592,6 +633,111 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn compose_config_args_keep_file_order_and_include_every_profile() {
+        let files = [
+            PathBuf::from("docker-compose.yml"),
+            PathBuf::from("ops/override.yml"),
+        ];
+        assert_eq!(
+            compose_config_args(&files),
+            vec![
+                "compose",
+                "-f",
+                "docker-compose.yml",
+                "-f",
+                "ops/override.yml",
+                "--profile",
+                "*",
+                "config",
+                "--format",
+                "json"
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_compose_plugin_is_a_missing_tool() {
+        for stderr in [
+            "docker: unknown command: docker compose\n\nRun 'docker --help' for more information",
+            "docker: 'compose' is not a docker command.",
+        ] {
+            assert!(matches!(
+                classify_compose_failure(stderr),
+                AppError::ToolMissing(tool) if tool == "docker compose"
+            ));
+        }
+    }
+
+    #[test]
+    fn other_compose_failures_are_conflicts_with_its_message() {
+        let err = classify_compose_failure("open /x/nope.yml: no such file or directory");
+        assert!(matches!(
+            err,
+            AppError::Conflict(m)
+                if m == "docker compose config failed: open /x/nope.yml: no such file or directory"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_config_parses_stdout_and_passes_the_context_first() {
+        let script = fake_docker(
+            r#"[ "$1 $2 $3 $4 $5" = "--context colima compose -f a.yml" ] || exit 9; echo '{"name":"shop"}'"#,
+        );
+        let cli = DockerCli::with_binary(
+            script.to_string_lossy().into_owned(),
+            Some("colima".into()),
+            "alpine:3".into(),
+        );
+        let value = cli.compose_config(&[PathBuf::from("a.yml")]).unwrap();
+        assert_eq!(value["name"], "shop");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_config_maps_a_failure_through_the_classifier() {
+        let script = fake_docker("echo 'docker: unknown command: docker compose' >&2; exit 1");
+        let cli = DockerCli::with_binary(
+            script.to_string_lossy().into_owned(),
+            None,
+            "alpine:3".into(),
+        );
+        assert!(matches!(
+            cli.compose_config(&[PathBuf::from("a.yml")]),
+            Err(AppError::ToolMissing(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_config_rejects_non_json_output() {
+        let script = fake_docker("echo 'not json'");
+        let cli = DockerCli::with_binary(
+            script.to_string_lossy().into_owned(),
+            None,
+            "alpine:3".into(),
+        );
+        assert!(matches!(
+            cli.compose_config(&[PathBuf::from("a.yml")]),
+            Err(AppError::Conflict(m)) if m.contains("invalid JSON")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tag_image_runs_docker_image_tag() {
+        let script =
+            fake_docker(r#"[ "$*" = "image tag shop-app:latest shop2-app:latest" ] || exit 9"#);
+        let cli = DockerCli::with_binary(
+            script.to_string_lossy().into_owned(),
+            None,
+            "alpine:3".into(),
+        );
+        cli.tag_image("shop-app:latest", "shop2-app:latest")
+            .unwrap();
     }
 
     #[test]
