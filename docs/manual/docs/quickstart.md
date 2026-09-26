@@ -2,7 +2,8 @@
 
 The whole tool is four commands, plus a pair for working with one volume at a
 time. This page runs through the four once, in the order you would actually use
-them, and then shows the pair.
+them, then shows the pair, and then how to limit a backup to one compose
+project.
 
 ```mermaid
 flowchart LR
@@ -141,9 +142,33 @@ docker-backup restore-volume ./volumes/pgdata-20260926T141500Z.tar.bz2 --as pgda
 Restoring into a volume that does not exist yet asks nothing; replacing one that
 does takes `--overwrite` and a confirmation. See [Single volumes](volumes.md).
 
+## Just one compose project
+
+When the daemon runs several compose projects, pass one project's compose files
+to `backup` and `restore`. Only that project's named volumes and locally built
+images are touched:
+
+```bash
+cd ~/src/shop
+docker compose stop
+docker-backup backup --from-docker-compose docker-compose.yml ./shop-backup
+docker compose start
+
+# later, on another machine or in a freshly cloned folder
+docker-backup restore --from-docker-compose docker-compose.yml ./shop-backup
+docker compose up -d
+```
+
+Layered files go in order, comma-separated: `--from-docker-compose
+docker-compose.yml,docker-compose.prod.yml`. If the folder, and so the project
+name, is different at restore time, volumes still land where compose will look
+for them. See [Compose projects](compose.md).
+
 ## Next
 
 - [How to back up](backup.md) — selection rules, compression, and layout.
 - [How to restore](restore.md) — the full restore model, including `--overwrite`
   and the architecture check.
 - [Single volumes](volumes.md) — one volume per archive, restored under any name.
+- [Compose projects](compose.md) — back up and restore only what one compose
+  project uses.

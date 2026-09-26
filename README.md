@@ -54,6 +54,8 @@ Requires `docker`, `tar`, and (for bzip2 options) `bzip2` on PATH.
     docker-backup restore ./my-backup --overwrite          # wipes and refills every listed volume
     docker-backup backup-volume pgdata -o ./volumes        # one volume, one .tar.bz2
     docker-backup restore-volume ./volumes/pgdata-20260926T141500Z.tar.bz2 --as pgdata-copy
+    docker-backup backup --from-docker-compose docker-compose.yml ./shop   # one compose project
+    docker-backup restore --from-docker-compose docker-compose.yml ./shop  # into it, as named now
     docker-backup --json doctor | jq .                     # machine-readable output
     docker-backup --json restore ./my-backup --yes         # non-interactive, --json requires --yes
 

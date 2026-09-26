@@ -4,7 +4,10 @@
 locally built images, and whole container filesystems — into one ordinary
 folder, and loads that folder back into a daemon later. It also works one volume
 at a time: [`backup-volume`](volumes.md) writes a single volume into a small
-archive of its own, which `restore-volume` can put back under any name.
+archive of its own, which `restore-volume` can put back under any name. And it
+can limit itself to [one compose project](compose.md): pass the project's
+compose files and only that project's volumes and images are backed up or
+restored.
 
 It is a coordinator, not a daemon and not a service. Every operation it
 performs is one you could perform yourself with `docker`, `tar` and patience;

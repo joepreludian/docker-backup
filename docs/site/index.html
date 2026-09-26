@@ -161,7 +161,10 @@ docker-backup info ./my-backup
 docker-backup restore ./my-backup
 
 <span class="text-slate-400 dark:text-slate-500"># or just one volume, into its own .tar.bz2</span>
-docker-backup backup-volume pgdata</code></pre>
+docker-backup backup-volume pgdata
+
+<span class="text-slate-400 dark:text-slate-500"># or just one compose project's volumes and built images</span>
+docker-backup backup --from-docker-compose docker-compose.yml ./shop</code></pre>
                 </div>
             </section>
 
@@ -172,7 +175,7 @@ docker-backup backup-volume pgdata</code></pre>
                         <h2 class="font-semibold text-slate-900 dark:text-white">Read the documentation</h2>
                         <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
                             Installation, a quickstart, and full guides to backing up and restoring,
-                            from the whole daemon down to a single volume.
+                            from the whole daemon down to one compose project or a single volume.
                         </p>
                     </div>
                     <span
