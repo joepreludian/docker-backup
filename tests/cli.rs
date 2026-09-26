@@ -84,6 +84,7 @@ fn help_lists_all_commands() {
         predicate::str::contains("backup")
             .and(predicate::str::contains("restore"))
             .and(predicate::str::contains("backup-volume"))
+            .and(predicate::str::contains("restore-volume"))
             .and(predicate::str::contains("info"))
             .and(predicate::str::contains("doctor")),
     );
@@ -239,4 +240,61 @@ fn backup_volume_writes_nothing_when_docker_is_unreachable() {
         .assert()
         .code(3);
     assert!(!out.exists());
+}
+
+#[test]
+fn restore_volume_refuses_a_path_that_is_not_an_archive() {
+    bin()
+        .args(["restore-volume", "/definitely/not/an/archive"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("is not a .tar.bz2 archive"));
+}
+
+#[test]
+fn restore_volume_refuses_an_as_name_docker_would_refuse() {
+    bin()
+        .args([
+            "restore-volume",
+            "/definitely/not/here.tar.bz2",
+            "--as",
+            "a/b",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("not a valid volume name"));
+}
+
+#[test]
+fn restore_volume_verifies_the_archive_before_reaching_docker() {
+    // An unknown context makes docker unreachable without touching any daemon:
+    // exit 3 proves verification passed, exit 1 that it failed.
+    let Some((dir, archive)) = volume_archive(b"hello\n") else {
+        return;
+    };
+    bin()
+        .args([
+            "--docker-context",
+            "definitely-not-a-context-xyz",
+            "restore-volume",
+        ])
+        .arg(&archive)
+        .assert()
+        .code(3);
+    assert!(no_scratch_left(dir.path()));
+
+    let Some((dir, archive)) = volume_archive(b"tampered\n") else {
+        return;
+    };
+    bin()
+        .args([
+            "--docker-context",
+            "definitely-not-a-context-xyz",
+            "restore-volume",
+        ])
+        .arg(&archive)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("verification failed"));
+    assert!(no_scratch_left(dir.path()));
 }

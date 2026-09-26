@@ -9,6 +9,7 @@ use std::io::{self, Write};
 use crate::domain::error::AppError;
 use crate::domain::report::{
     BackupReport, DoctorReport, InfoReport, RestoreReport, VolumeBackupReport, VolumeInfoReport,
+    VolumeRestoreReport,
 };
 
 pub use preview::{format_arch_warning, format_restore_preview, format_volume_overwrite_prompt};
@@ -25,6 +26,11 @@ pub trait Renderer {
     fn render_volume_backup(
         &self,
         report: &VolumeBackupReport,
+        out: &mut dyn Write,
+    ) -> io::Result<()>;
+    fn render_volume_restore(
+        &self,
+        report: &VolumeRestoreReport,
         out: &mut dyn Write,
     ) -> io::Result<()>;
     fn render_info(&self, report: &InfoReport, out: &mut dyn Write) -> io::Result<()>;
@@ -58,6 +64,7 @@ mod tests {
     use crate::domain::report::{
         BackupReport, ContainerCounts, DoctorReport, ImageCounts, InfoReport, ItemOutcome,
         ItemResult, RestoreReport, ToolStatus, VolumeBackupReport, VolumeCounts, VolumeInfoReport,
+        VolumeRestoreAction, VolumeRestoreReport,
     };
     use crate::domain::verification::{FileCheck, FileStatus, VerificationReport};
     use crate::domain::volume_manifest::VolumeManifest;
@@ -453,5 +460,66 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
         }
+    }
+
+    fn volume_restore_report() -> VolumeRestoreReport {
+        VolumeRestoreReport {
+            source: "/b/pgdata-20260926T141500Z.tar.bz2".into(),
+            volume: "pgdata".into(),
+            target: "pgdata".into(),
+            created_at: datetime!(2026-09-26 14:15:00 UTC),
+            action: VolumeRestoreAction::Create,
+            outcome: ItemOutcome::Done { size_bytes: 2 },
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn json_volume_restore_is_the_report() {
+        let value = render_json(|r, out| r.render_volume_restore(&volume_restore_report(), out));
+        assert_eq!(value["source"], "/b/pgdata-20260926T141500Z.tar.bz2");
+        assert_eq!(value["volume"], "pgdata");
+        assert_eq!(value["target"], "pgdata");
+        assert_eq!(value["action"], "create");
+        assert_eq!(value["status"], "done");
+        assert_eq!(value["created_at"], "2026-09-26T14:15:00Z");
+        assert!(value.get("hint").is_none());
+    }
+
+    #[test]
+    fn human_volume_restore_says_what_happened() {
+        let created = render_human(|r, out| r.render_volume_restore(&volume_restore_report(), out));
+        assert_eq!(created, "✓ pgdata → pgdata (created)\n");
+
+        let overwritten = VolumeRestoreReport {
+            action: VolumeRestoreAction::Overwrite,
+            ..volume_restore_report()
+        };
+        let text = render_human(|r, out| r.render_volume_restore(&overwritten, out));
+        assert_eq!(text, "✓ pgdata → pgdata (overwritten)\n");
+
+        let renamed = VolumeRestoreReport {
+            target: "pgdata2".into(),
+            ..volume_restore_report()
+        };
+        let text = render_human(|r, out| r.render_volume_restore(&renamed, out));
+        assert_eq!(text, "✓ pgdata → pgdata2 (created)\n");
+
+        let failed = VolumeRestoreReport {
+            outcome: ItemOutcome::Failed {
+                error: "boom".into(),
+            },
+            hint: Some(
+                "volume pgdata was created and may be partially filled; retry with --overwrite"
+                    .into(),
+            ),
+            ..volume_restore_report()
+        };
+        let text = render_human(|r, out| r.render_volume_restore(&failed, out));
+        assert_eq!(
+            text,
+            "✗ pgdata → pgdata: boom\n\
+             hint: volume pgdata was created and may be partially filled; retry with --overwrite\n"
+        );
     }
 }

@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 
 use crate::application::backup::BackupRequest;
 use crate::application::restore::RestoreRequest;
-use crate::application::volume::VolumeBackupRequest;
+use crate::application::volume::{VolumeBackupRequest, VolumeRestoreRequest};
 use crate::domain::manifest::Compression;
 use crate::domain::naming::utc_stamp;
 use crate::domain::plan::{BackupScope, RestorePolicy};
@@ -47,6 +47,8 @@ pub enum Command {
     Restore(RestoreArgs),
     /// Export named volumes, each into its own <DIR>/<volume>-<UTC timestamp>.tar.bz2.
     BackupVolume(BackupVolumeArgs),
+    /// Restore one single-volume archive into a volume: its own, or --as another.
+    RestoreVolume(RestoreVolumeArgs),
     /// Show a backup's or a single-volume archive's manifest and verify its files.
     Info(InfoArgs),
     /// Report on the docker daemon and the external tools this program needs.
@@ -126,6 +128,21 @@ pub struct BackupVolumeArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct RestoreVolumeArgs {
+    /// Single-volume .tar.bz2 archive written by backup-volume.
+    pub source: PathBuf,
+    /// Restore into this volume instead of the one the archive was made from.
+    #[arg(long = "as", value_name = "NAME")]
+    pub as_name: Option<String>,
+    /// Empty and refill the volume if it already exists (asks first unless --yes).
+    #[arg(long)]
+    pub overwrite: bool,
+    /// Answer yes to the overwrite prompt (required for --json and non-interactive use).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct InfoArgs {
     /// Backup folder, .tar.bz2 archive, or single-volume archive (or its extracted folder).
     pub source: PathBuf,
@@ -182,6 +199,16 @@ impl BackupVolumeArgs {
         VolumeBackupRequest {
             names: self.names.clone(),
             output_dir: self.output_dir.clone(),
+        }
+    }
+}
+
+impl RestoreVolumeArgs {
+    pub fn to_request(&self) -> VolumeRestoreRequest {
+        VolumeRestoreRequest {
+            source: self.source.clone(),
+            target: self.as_name.clone(),
+            overwrite: self.overwrite,
         }
     }
 }
@@ -392,5 +419,55 @@ mod tests {
     fn backup_volume_requires_a_name() {
         assert!(Cli::try_parse_from(["docker-backup", "backup-volume"]).is_err());
         assert!(Cli::try_parse_from(["docker-backup", "backup-volume", "-o", "/tmp/out"]).is_err());
+    }
+
+    #[test]
+    fn restore_volume_args_map_to_request() {
+        let cli = Cli::try_parse_from([
+            "docker-backup",
+            "restore-volume",
+            "pg.tar.bz2",
+            "--as",
+            "pgdata2",
+            "--overwrite",
+            "-y",
+        ])
+        .unwrap();
+        let Command::RestoreVolume(args) = cli.command else {
+            panic!("expected restore-volume")
+        };
+        assert!(args.yes);
+        let request = args.to_request();
+        assert_eq!(request.source, PathBuf::from("pg.tar.bz2"));
+        assert_eq!(request.target.as_deref(), Some("pgdata2"));
+        assert!(request.overwrite);
+    }
+
+    #[test]
+    fn restore_volume_defaults_to_the_archived_name_without_overwrite() {
+        let cli = Cli::try_parse_from(["docker-backup", "restore-volume", "pg.tar.bz2"]).unwrap();
+        let Command::RestoreVolume(args) = cli.command else {
+            panic!("expected restore-volume")
+        };
+        assert!(!args.yes);
+        let request = args.to_request();
+        assert_eq!(request.target, None);
+        assert!(!request.overwrite);
+
+        let cli = Cli::try_parse_from(["docker-backup", "restore-volume", "pg.tar.bz2", "--yes"])
+            .unwrap();
+        let Command::RestoreVolume(args) = cli.command else {
+            panic!("expected restore-volume")
+        };
+        assert!(args.yes);
+    }
+
+    #[test]
+    fn restore_volume_takes_exactly_one_file() {
+        assert!(Cli::try_parse_from(["docker-backup", "restore-volume"]).is_err());
+        assert!(
+            Cli::try_parse_from(["docker-backup", "restore-volume", "a.tar.bz2", "b.tar.bz2"])
+                .is_err()
+        );
     }
 }

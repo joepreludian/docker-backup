@@ -9,7 +9,7 @@ use crate::application::doctor::DoctorService;
 use crate::application::info::InfoService;
 use crate::application::ports::Clock;
 use crate::application::restore::RestoreService;
-use crate::application::volume::VolumeBackupService;
+use crate::application::volume::{VolumeBackupService, VolumeRestoreService};
 use crate::cli::{Cli, Command};
 use crate::domain::error::AppResult;
 use crate::domain::report::Info;
@@ -66,17 +66,7 @@ pub fn run() -> i32 {
             })
         }
         Command::Restore(args) => {
-            // Prompts/boxes go to stderr, not stdout, so they get their own color
-            // decision based on stderr's tty-ness (not `color`, which is stdout's).
-            let prompt_color =
-                !cli.json && io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
-            let confirm = TerminalConfirm::new(
-                io::BufReader::new(io::stdin()),
-                io::stderr(),
-                args.yes,
-                io::stdin().is_terminal() && !cli.json,
-                prompt_color,
-            );
+            let confirm = terminal_confirm(args.yes, cli.json);
             RestoreService {
                 docker: &docker,
                 store: &store,
@@ -100,6 +90,20 @@ pub fn run() -> i32 {
             renderer.render_volume_backup(&report, &mut stdout)?;
             Ok(report.exit_code())
         }),
+        Command::RestoreVolume(args) => {
+            let confirm = terminal_confirm(args.yes, cli.json);
+            VolumeRestoreService {
+                docker: &docker,
+                store: &store,
+                progress: &progress,
+                confirm: &confirm,
+            }
+            .run(&args.to_request())
+            .and_then(|report| {
+                renderer.render_volume_restore(&report, &mut stdout)?;
+                Ok(report.exit_code())
+            })
+        }
         Command::Info(args) => InfoService { store: &store }
             .run(&args.source)
             .and_then(|info| {
@@ -129,4 +133,21 @@ pub fn run() -> i32 {
     };
     let _ = stdout.flush();
     code
+}
+
+/// Prompts go to stderr and read stdin, so their colour follows stderr's
+/// tty-ness (not `color`, which is stdout's), and they only ask when stdin is a
+/// terminal and `--json` is off.
+fn terminal_confirm(
+    yes: bool,
+    json: bool,
+) -> TerminalConfirm<io::BufReader<io::Stdin>, io::Stderr> {
+    let color = !json && io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    TerminalConfirm::new(
+        io::BufReader::new(io::stdin()),
+        io::stderr(),
+        yes,
+        io::stdin().is_terminal() && !json,
+        color,
+    )
 }

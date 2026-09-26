@@ -6,6 +6,7 @@ use serde_json::json;
 use crate::domain::error::AppError;
 use crate::domain::report::{
     BackupReport, DoctorReport, InfoReport, RestoreReport, VolumeBackupReport, VolumeInfoReport,
+    VolumeRestoreReport,
 };
 use crate::presentation::Renderer;
 
@@ -38,6 +39,14 @@ impl Renderer for JsonRenderer {
     fn render_volume_backup(
         &self,
         report: &VolumeBackupReport,
+        out: &mut dyn Write,
+    ) -> io::Result<()> {
+        emit(report, out)
+    }
+
+    fn render_volume_restore(
+        &self,
+        report: &VolumeRestoreReport,
         out: &mut dyn Write,
     ) -> io::Result<()> {
         emit(report, out)

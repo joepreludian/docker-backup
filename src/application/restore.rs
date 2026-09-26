@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use crate::application::ports::{ArchiveStore, ConfirmPort, DockerPort, Operation, ProgressSink};
 use crate::application::verify::{locate_backup, read_manifest, verify_files};
 use crate::domain::error::{AppError, AppResult};
-use crate::domain::manifest::Compression;
+use crate::domain::manifest::{Compression, MANIFEST_FILE};
 use crate::domain::plan::{RestoreAction, RestorePlan, RestorePolicy};
 use crate::domain::refs::ItemKind;
 use crate::domain::report::{ItemOutcome, ItemResult, RestoreReport};
+use crate::domain::volume_manifest::VOLUME_MANIFEST_FILE;
 
 #[derive(Debug, Clone)]
 pub struct RestoreRequest {
@@ -33,6 +34,14 @@ impl RestoreService<'_> {
     }
 
     fn run_in(&self, root: &Path, request: &RestoreRequest) -> AppResult<RestoreReport> {
+        if !self.store.exists(&root.join(MANIFEST_FILE))
+            && self.store.exists(&root.join(VOLUME_MANIFEST_FILE))
+        {
+            return Err(AppError::ManifestInvalid(format!(
+                "{} is a single-volume archive; use `docker-backup restore-volume`",
+                request.source.display()
+            )));
+        }
         let manifest = read_manifest(self.store, root)?;
         if request.verify {
             let verification = verify_files(self.store, root, &manifest)?;
@@ -791,5 +800,26 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.exit_code(), 3);
         assert!(confirm.asked.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_single_volume_archive_points_to_restore_volume() {
+        let store = MemoryArchiveStore::new();
+        store.put("/v/volume.json", b"{}");
+        store.put("/v/backup.tar", b"PG");
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let mut req = request(RestorePolicy::default());
+        req.source = PathBuf::from("/v");
+        let err = run(&docker, &store, &progress, &confirm, &req).unwrap_err();
+        assert!(
+            matches!(&err, AppError::ManifestInvalid(msg)
+                if msg == "/v is a single-volume archive; use `docker-backup restore-volume`"),
+            "{err:?}"
+        );
+        assert!(docker.calls.borrow().is_empty());
     }
 }

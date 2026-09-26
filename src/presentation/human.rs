@@ -8,7 +8,7 @@ use console::style;
 use crate::domain::error::AppError;
 use crate::domain::report::{
     BackupReport, DoctorReport, InfoReport, ItemOutcome, ItemResult, RestoreReport,
-    VolumeBackupReport, VolumeInfoReport, human_size,
+    VolumeBackupReport, VolumeInfoReport, VolumeRestoreAction, VolumeRestoreReport, human_size,
 };
 use crate::domain::verification::{FileStatus, VerificationReport};
 use crate::presentation::Renderer;
@@ -165,6 +165,30 @@ impl Renderer for HumanRenderer {
             report.failed_count(),
             human_size(report.total_bytes())
         )
+    }
+
+    fn render_volume_restore(
+        &self,
+        report: &VolumeRestoreReport,
+        out: &mut dyn Write,
+    ) -> io::Result<()> {
+        let route = format!("{} → {}", report.volume, report.target);
+        match &report.outcome {
+            ItemOutcome::Failed { error } => {
+                writeln!(out, "{} {route}: {error}", self.paint("✗", Tone::Bad))?;
+            }
+            _ => {
+                let done = match report.action {
+                    VolumeRestoreAction::Create => "created",
+                    VolumeRestoreAction::Overwrite => "overwritten",
+                };
+                writeln!(out, "{} {route} ({done})", self.paint("✓", Tone::Good))?;
+            }
+        }
+        if let Some(hint) = &report.hint {
+            writeln!(out, "hint: {hint}")?;
+        }
+        Ok(())
     }
 
     fn render_info(&self, report: &InfoReport, out: &mut dyn Write) -> io::Result<()> {
