@@ -28,6 +28,10 @@
 //! `backup-volume` exports just that one, and every `restore-volume` targets it
 //! (or a `-copy` of it) by name, so it touches nothing else on the daemon.
 //!
+//! `compose_roundtrip_into_a_renamed_project` builds its own `dbk-it-*` compose
+//! project: backup and restore both run with `--from-docker-compose`, so they
+//! touch only that project's volume and image, and it never passes `--overwrite`.
+//!
 //! Run with: DOCKER_BACKUP_IT=1 cargo test --test docker_integration -- --ignored --test-threads=1
 
 use std::fs;
@@ -433,4 +437,145 @@ fn single_volume_roundtrip() {
         "/data",
     ]);
     assert_eq!(listing, "hello.txt");
+}
+
+/// A throwaway compose project in `<parent>/<name>`: one service built from a
+/// one-line Dockerfile, one named volume. Dropping it removes the project's
+/// network, its `<name>_data` volume and its `<name>-app:latest` tag by name —
+/// `compose down` alone may skip a volume restored without compose's labels.
+struct TestProject {
+    name: String,
+    dir: PathBuf,
+}
+
+impl TestProject {
+    fn create(parent: &Path, name: &str) -> Self {
+        let dir = parent.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Dockerfile"), "FROM alpine:3\n").unwrap();
+        fs::write(
+            dir.join("docker-compose.yml"),
+            "services:\n  app:\n    build: .\n    volumes:\n      - data:/data\nvolumes:\n  data:\n",
+        )
+        .unwrap();
+        Self {
+            name: name.to_string(),
+            dir,
+        }
+    }
+
+    fn file(&self) -> PathBuf {
+        self.dir.join("docker-compose.yml")
+    }
+
+    fn compose(&self, args: &[&str]) -> String {
+        let file = self.file();
+        let mut all = vec!["compose", "-f", file.to_str().unwrap()];
+        all.extend_from_slice(args);
+        docker(&all)
+    }
+}
+
+impl Drop for TestProject {
+    fn drop(&mut self) {
+        let file = self.file();
+        let _ = Command::new("docker")
+            .args(["compose", "-f", file.to_str().unwrap(), "down", "--volumes"])
+            .output();
+        let _ = Command::new("docker")
+            .args(["volume", "rm", "-f", &format!("{}_data", self.name)])
+            .output();
+        let _ = Command::new("docker")
+            .args(["image", "rm", "-f", &format!("{}-app:latest", self.name)])
+            .output();
+    }
+}
+
+#[test]
+#[ignore]
+fn compose_roundtrip_into_a_renamed_project() {
+    if !enabled() {
+        return;
+    }
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+    // The folder name is the project name, so the copy is a renamed project.
+    let (name, renamed) = (format!("dbk-it-{stamp}"), format!("dbk-it-{stamp}-2"));
+    let dir = tempfile::tempdir().unwrap();
+    let original = TestProject::create(dir.path(), &name);
+    original.compose(&["build"]);
+    original.compose(&[
+        "run",
+        "--rm",
+        "-T",
+        "app",
+        "sh",
+        "-c",
+        "printf 'hello from compose' > /data/hello.txt",
+    ]);
+
+    let out = dir.path().join("backup");
+    let report = json_report(
+        &[
+            "--json",
+            "backup",
+            "--from-docker-compose",
+            original.file().to_str().unwrap(),
+        ],
+        &out,
+    );
+    let items = report["items"].as_array().expect("report has items");
+    let names: Vec<&str> = items.iter().map(|i| i["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        vec![format!("{name}_data"), format!("{name}-app:latest")],
+        "only the project's volume and built image"
+    );
+    assert!(items.iter().all(|i| i["status"] == "done"), "{items:?}");
+    assert_eq!(report["compose"]["project"], name);
+
+    let info = json_report(&["--json", "info"], &out);
+    assert_eq!(info["manifest"]["compose"]["project"], name);
+    assert_eq!(info["manifest"]["volumes"][0]["compose"]["key"], "data");
+
+    let copy = TestProject::create(dir.path(), &renamed);
+    let restored = json_report(
+        &[
+            "--json",
+            "restore",
+            "--yes",
+            "--from-docker-compose",
+            copy.file().to_str().unwrap(),
+        ],
+        &out,
+    );
+    let items = restored["items"].as_array().expect("report has items");
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[0]["name"], format!("{name}_data"));
+    assert_eq!(items[0]["target"], format!("{renamed}_data"));
+    assert!(items.iter().all(|i| i["status"] == "restored"), "{items:?}");
+
+    let read = docker(&[
+        "run",
+        "--rm",
+        "-v",
+        &format!("{renamed}_data:/data:ro"),
+        "alpine:3",
+        "cat",
+        "/data/hello.txt",
+    ]);
+    assert_eq!(read, "hello from compose");
+    docker(&[
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        &format!("{renamed}-app:latest"),
+    ]);
 }
