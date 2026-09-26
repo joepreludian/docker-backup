@@ -147,7 +147,7 @@ pub fn normalize_image_ref(reference: &str) -> String {
 }
 
 /// Top-level `compose` block of a manifest: the backup came from this project.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComposeInfo {
     pub project: String,
     /// As typed on the command line.

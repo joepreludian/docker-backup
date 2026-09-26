@@ -1,7 +1,9 @@
 //! Pure planning: which items a backup or restore will touch, and how.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::domain::compose::{ComposeInfo, ComposeProject, ImageCompose, VolumeCompose};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::manifest::{ContainerEntry, ImageEntry, Manifest, VolumeEntry};
 use crate::domain::platform::Platform;
@@ -22,6 +24,17 @@ pub struct BackupScope {
     pub images: bool,
     pub all_images: bool,
     pub containers: Vec<String>,
+    /// Limits the backup to one compose project (`--from-docker-compose`).
+    pub compose: Option<ComposeScope>,
+}
+
+/// The compose project a backup is limited to.
+#[derive(Debug, Clone)]
+pub struct ComposeScope {
+    pub project: ComposeProject,
+    /// The files as typed, recorded in the manifest.
+    pub files: Vec<String>,
+    pub include_external: bool,
 }
 
 impl Default for BackupScope {
@@ -32,8 +45,21 @@ impl Default for BackupScope {
             images: true,
             all_images: false,
             containers: Vec::new(),
+            compose: None,
         }
     }
+}
+
+/// What a compose-scoped plan knows beyond the items themselves.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComposePlan {
+    pub info: ComposeInfo,
+    /// By volume name.
+    pub volumes: BTreeMap<String, VolumeCompose>,
+    /// By image id.
+    pub images: BTreeMap<String, ImageCompose>,
+    /// Declared by the project but absent on the daemon: volume names and image refs.
+    pub not_found: Vec<(ItemKind, String)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -41,10 +67,16 @@ pub struct BackupPlan {
     pub volumes: Vec<VolumeRef>,
     pub images: Vec<ImageRef>,
     pub containers: Vec<ContainerRef>,
+    /// Set for a compose-scoped backup; in it each image's `tags` is just the
+    /// project's tag, so `primary_ref()` is what gets saved.
+    pub compose: Option<ComposePlan>,
 }
 
 impl BackupPlan {
     pub fn build(inventory: &Inventory, scope: &BackupScope) -> AppResult<Self> {
+        if let Some(compose) = &scope.compose {
+            return Self::build_for_compose(inventory, scope, compose);
+        }
         let mut volumes: Vec<VolumeRef> = if scope.volumes {
             inventory
                 .volumes
@@ -84,6 +116,116 @@ impl BackupPlan {
             volumes,
             images,
             containers,
+            compose: None,
+        })
+    }
+
+    /// The project's named volumes and the images its services run, as far as
+    /// the daemon has them; what it lacks is listed in `not_found`.
+    fn build_for_compose(
+        inventory: &Inventory,
+        scope: &BackupScope,
+        compose: &ComposeScope,
+    ) -> AppResult<Self> {
+        let project = &compose.project;
+        let mut meta = ComposePlan {
+            info: ComposeInfo {
+                project: project.name.clone(),
+                files: compose.files.clone(),
+            },
+            ..ComposePlan::default()
+        };
+
+        let mut volumes = Vec::new();
+        if scope.volumes {
+            for volume in &project.volumes {
+                if volume.external && !compose.include_external {
+                    continue;
+                }
+                match inventory.volumes.iter().find(|v| v.name == volume.name) {
+                    Some(found) => {
+                        volumes.push(found.clone());
+                        meta.volumes.insert(
+                            volume.name.clone(),
+                            VolumeCompose {
+                                key: volume.key.clone(),
+                                external: volume.external,
+                            },
+                        );
+                    }
+                    None => meta.not_found.push((ItemKind::Volume, volume.name.clone())),
+                }
+            }
+            volumes.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+
+        let mut images: Vec<ImageRef> = Vec::new();
+        if scope.images {
+            // Services are sorted by name, so the first service naming an image
+            // picks the tag it is saved under.
+            for service in &project.services {
+                let Some(found) = inventory
+                    .images
+                    .iter()
+                    .find(|i| i.tags.contains(&service.image))
+                else {
+                    // An absent image-only ref would never have been saved: it is pulled.
+                    let missing = (ItemKind::Image, service.image.clone());
+                    if (service.builds || scope.all_images) && !meta.not_found.contains(&missing) {
+                        meta.not_found.push(missing);
+                    }
+                    continue;
+                };
+                if found.origin == ImageOrigin::Pulled && !scope.all_images {
+                    continue;
+                }
+                if let Some(entry) = meta.images.get_mut(&found.id) {
+                    entry.services.push(service.name.clone());
+                    continue;
+                }
+                images.push(ImageRef {
+                    id: found.id.clone(),
+                    tags: vec![service.image.clone()],
+                    origin: found.origin,
+                });
+                meta.images.insert(
+                    found.id.clone(),
+                    ImageCompose {
+                        services: vec![service.name.clone()],
+                    },
+                );
+            }
+            images.sort_by_key(ImageRef::primary_ref);
+        }
+
+        if volumes.is_empty() && images.is_empty() {
+            let message = if meta.not_found.is_empty() {
+                format!(
+                    "compose project {} has nothing to back up: no named volumes and no \
+                     locally built images (--all-images adds pulled ones)",
+                    project.name
+                )
+            } else {
+                let names: Vec<&str> = meta
+                    .not_found
+                    .iter()
+                    .map(|(_, name)| name.as_str())
+                    .collect();
+                format!(
+                    "none of compose project {}'s volumes or images exist on this docker \
+                     daemon (not found: {}); check --docker-context",
+                    project.name,
+                    names.join(", ")
+                )
+            };
+            return Err(AppError::Conflict(message));
+        }
+
+        Ok(Self {
+            volumes,
+            images,
+            containers: Vec::new(),
+            compose: Some(meta),
         })
     }
 
@@ -333,6 +475,228 @@ mod tests {
     use crate::domain::manifest::{Compression, DockerInfo, Sha256Digest};
     use serde_json::json;
     use time::macros::datetime;
+
+    fn shop_project() -> ComposeProject {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/compose/shop.json")).unwrap();
+        ComposeProject::from_config(&config).unwrap()
+    }
+
+    fn image(id: &str, tags: &[&str], origin: ImageOrigin) -> ImageRef {
+        ImageRef {
+            id: id.into(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            origin,
+        }
+    }
+
+    /// Daemon with most shop volumes, another project's volume, the image app and
+    /// worker share (also tagged `mine:dev`, listed first), a pulled api image and
+    /// a pulled postgres.
+    fn shop_inventory() -> Inventory {
+        Inventory {
+            volumes: vec![
+                VolumeRef::new("shop_appdata", ""),
+                VolumeRef::new("shop-pg-custom", ""),
+                VolumeRef::new("company-shared", ""),
+                VolumeRef::new("other_data", ""),
+            ],
+            images: vec![
+                image(
+                    "sha256:app",
+                    &["mine:dev", "shop-app:latest", "shop-worker:latest"],
+                    ImageOrigin::Built,
+                ),
+                image(
+                    "sha256:api",
+                    &["registry.example.com/shop/api:1.2"],
+                    ImageOrigin::Pulled,
+                ),
+                image("sha256:pg", &["postgres:17"], ImageOrigin::Pulled),
+                image("sha256:other", &["other:latest"], ImageOrigin::Built),
+            ],
+            containers: Vec::new(),
+        }
+    }
+
+    fn compose_scope(include_external: bool) -> BackupScope {
+        BackupScope {
+            compose: Some(ComposeScope {
+                project: shop_project(),
+                files: vec!["docker-compose.yml".into()],
+                include_external,
+            }),
+            ..BackupScope::default()
+        }
+    }
+
+    #[test]
+    fn compose_scope_takes_only_the_projects_volumes_and_built_images() {
+        let plan = BackupPlan::build(&shop_inventory(), &compose_scope(true)).unwrap();
+        let volumes: Vec<&str> = plan.volumes.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(
+            volumes,
+            vec!["company-shared", "shop-pg-custom", "shop_appdata"]
+        );
+        assert_eq!(
+            plan.images.len(),
+            1,
+            "one id shared by app and worker; api and pg are pulled"
+        );
+        assert_eq!(plan.images[0].id, "sha256:app");
+        assert_eq!(
+            plan.images[0].primary_ref(),
+            "shop-app:latest",
+            "saved under the project tag"
+        );
+        assert!(plan.containers.is_empty());
+
+        let compose = plan.compose.unwrap();
+        assert_eq!(compose.info.project, "shop");
+        assert_eq!(compose.info.files, vec!["docker-compose.yml"]);
+        assert_eq!(
+            compose.volumes["shop_appdata"],
+            VolumeCompose {
+                key: "appdata".into(),
+                external: false
+            }
+        );
+        assert_eq!(
+            compose.volumes["company-shared"],
+            VolumeCompose {
+                key: "shared".into(),
+                external: true
+            }
+        );
+        assert_eq!(compose.images["sha256:app"].services, vec!["app", "worker"]);
+    }
+
+    #[test]
+    fn compose_not_found_lists_absent_volumes_and_built_images_only() {
+        let plan = BackupPlan::build(&shop_inventory(), &compose_scope(true)).unwrap();
+        // cachedata and debugdata are absent; every build service's image exists;
+        // absent image-only refs (redis:7, nginx:latest) are not noise.
+        assert_eq!(
+            plan.compose.unwrap().not_found,
+            vec![
+                (ItemKind::Volume, "shop_cachedata".to_string()),
+                (ItemKind::Volume, "shop_debugdata".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_absent_built_image_is_reported() {
+        let mut inventory = shop_inventory();
+        inventory.images.retain(|i| i.id != "sha256:app");
+        let plan = BackupPlan::build(&inventory, &compose_scope(true)).unwrap();
+        let not_found = plan.compose.unwrap().not_found;
+        assert!(not_found.contains(&(ItemKind::Image, "shop-app:latest".to_string())));
+        assert!(not_found.contains(&(ItemKind::Image, "shop-worker:latest".to_string())));
+        assert!(!not_found.iter().any(|(_, n)| n == "redis:7"));
+    }
+
+    #[test]
+    fn compose_all_images_adds_pulled_ones_and_reports_absent_image_only_refs() {
+        let scope = BackupScope {
+            all_images: true,
+            ..compose_scope(true)
+        };
+        let plan = BackupPlan::build(&shop_inventory(), &scope).unwrap();
+        let refs: Vec<String> = plan.images.iter().map(ImageRef::primary_ref).collect();
+        assert_eq!(
+            refs,
+            vec![
+                "postgres:17",
+                "registry.example.com/shop/api:1.2",
+                "shop-app:latest"
+            ]
+        );
+        let not_found = plan.compose.unwrap().not_found;
+        assert!(not_found.contains(&(ItemKind::Image, "redis:7".to_string())));
+        assert!(not_found.contains(&(ItemKind::Image, "nginx:latest".to_string())));
+    }
+
+    #[test]
+    fn compose_no_external_leaves_external_volumes_out() {
+        let plan = BackupPlan::build(&shop_inventory(), &compose_scope(false)).unwrap();
+        assert!(!plan.volumes.iter().any(|v| v.name == "company-shared"));
+        assert!(
+            !plan
+                .compose
+                .unwrap()
+                .not_found
+                .iter()
+                .any(|(_, n)| n == "company-shared")
+        );
+    }
+
+    #[test]
+    fn compose_project_absent_from_the_daemon_is_a_conflict() {
+        let inventory = Inventory {
+            volumes: vec![VolumeRef::new("other_data", "")],
+            images: vec![image("sha256:other", &["other:latest"], ImageOrigin::Built)],
+            containers: Vec::new(),
+        };
+        let err = BackupPlan::build(&inventory, &compose_scope(true)).unwrap_err();
+        assert!(
+            matches!(&err, AppError::Conflict(m)
+                if m.contains("none of compose project shop")
+                    && m.contains("shop_appdata")
+                    && m.contains("--docker-context")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn compose_project_with_nothing_qualifying_is_a_conflict() {
+        let project = ComposeProject::from_config(&json!({
+            "name": "web", "services": { "web": { "image": "nginx" } }
+        }))
+        .unwrap();
+        let inventory = Inventory {
+            images: vec![image("sha256:n", &["nginx:latest"], ImageOrigin::Pulled)],
+            ..Inventory::default()
+        };
+        let scope = BackupScope {
+            compose: Some(ComposeScope {
+                project,
+                files: vec![],
+                include_external: true,
+            }),
+            ..BackupScope::default()
+        };
+        let err = BackupPlan::build(&inventory, &scope).unwrap_err();
+        assert!(
+            matches!(&err, AppError::Conflict(m)
+                if m.contains("nothing to back up") && m.contains("--all-images")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn compose_scope_honours_no_volumes() {
+        let scope = BackupScope {
+            volumes: false,
+            ..compose_scope(true)
+        };
+        let plan = BackupPlan::build(&shop_inventory(), &scope).unwrap();
+        assert!(plan.volumes.is_empty());
+        assert!(
+            !plan
+                .compose
+                .unwrap()
+                .not_found
+                .iter()
+                .any(|(k, _)| *k == ItemKind::Volume)
+        );
+    }
+
+    #[test]
+    fn full_scope_has_no_compose_plan() {
+        let plan = BackupPlan::build(&inventory(), &BackupScope::default()).unwrap();
+        assert!(plan.compose.is_none());
+    }
 
     fn inventory() -> Inventory {
         Inventory {

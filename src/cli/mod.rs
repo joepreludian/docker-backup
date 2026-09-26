@@ -165,6 +165,8 @@ impl BackupArgs {
                 images: !self.no_images,
                 all_images: self.all_images,
                 containers: self.containers.clone(),
+                // Filled in by the backup service once the compose files are rendered.
+                compose: None,
             },
             compression: if self.per_file_bzip2 {
                 Compression::Bzip2PerFile
