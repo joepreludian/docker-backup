@@ -14,7 +14,7 @@ use crate::application::ports::{
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::manifest::{Compression, DockerInfo, Sha256Digest, ToolInfo};
 use crate::domain::platform::Platform;
-use crate::domain::preview::RestorePreview;
+use crate::domain::preview::{RestorePreview, VolumeOverwritePrompt};
 use crate::domain::refs::{ContainerRef, ImageOrigin, ImageRef, ItemKind, VolumeRef};
 use crate::domain::report::ItemOutcome;
 
@@ -296,8 +296,10 @@ impl DockerPort for FakeDocker {
 pub struct FakeConfirm {
     pub decline_restore: bool,
     pub decline_arch: bool,
+    pub decline_volume_overwrite: bool,
     pub asked: RefCell<Vec<String>>,
     pub previews: RefCell<Vec<RestorePreview>>,
+    pub volume_prompts: RefCell<Vec<VolumeOverwritePrompt>>,
 }
 
 impl FakeConfirm {
@@ -318,6 +320,13 @@ impl FakeConfirm {
             ..Self::default()
         }
     }
+
+    pub fn declining_volume_overwrite() -> Self {
+        Self {
+            decline_volume_overwrite: true,
+            ..Self::default()
+        }
+    }
 }
 
 impl ConfirmPort for FakeConfirm {
@@ -335,6 +344,16 @@ impl ConfirmPort for FakeConfirm {
         self.asked.borrow_mut().push("arch".into());
         self.previews.borrow_mut().push(preview.clone());
         if self.decline_arch {
+            Err(AppError::Aborted("declined by test".into()))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn confirm_volume_overwrite(&self, prompt: &VolumeOverwritePrompt) -> AppResult<()> {
+        self.asked.borrow_mut().push("volume_overwrite".into());
+        self.volume_prompts.borrow_mut().push(prompt.clone());
+        if self.decline_volume_overwrite {
             Err(AppError::Aborted("declined by test".into()))
         } else {
             Ok(())

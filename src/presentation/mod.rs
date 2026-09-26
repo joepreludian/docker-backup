@@ -11,7 +11,7 @@ use crate::domain::report::{
     BackupReport, DoctorReport, InfoReport, RestoreReport, VolumeBackupReport, VolumeInfoReport,
 };
 
-pub use preview::{format_arch_warning, format_restore_preview};
+pub use preview::{format_arch_warning, format_restore_preview, format_volume_overwrite_prompt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {

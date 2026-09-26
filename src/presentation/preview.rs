@@ -2,8 +2,10 @@
 //! confirmation prompts. Pure formatting: no I/O — callers write the result.
 
 use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
+use time::UtcOffset;
+use time::macros::format_description;
 
-use crate::domain::preview::RestorePreview;
+use crate::domain::preview::{RestorePreview, VolumeOverwritePrompt};
 
 #[derive(Clone, Copy)]
 enum Tone {
@@ -130,6 +132,20 @@ pub fn format_arch_warning(preview: &RestorePreview, color: bool) -> String {
     format!("Architecture mismatch\n{table}")
 }
 
+/// The one-line question asked before `restore-volume --overwrite` empties a volume.
+pub fn format_volume_overwrite_prompt(prompt: &VolumeOverwritePrompt) -> String {
+    let backed_up = prompt
+        .created_at
+        .to_offset(UtcOffset::UTC)
+        .format(format_description!("[year]-[month]-[day] [hour]:[minute]"))
+        .unwrap_or_default();
+    format!(
+        "Volume {} will be emptied and refilled from {} (backed up {backed_up} UTC). Continue? [y/N] ",
+        prompt.target,
+        prompt.source.display()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -138,7 +154,7 @@ mod tests {
 
     use super::*;
     use crate::domain::platform::Platform;
-    use crate::domain::preview::{MismatchedItem, RestorePreview};
+    use crate::domain::preview::{MismatchedItem, RestorePreview, VolumeOverwritePrompt};
     use crate::domain::refs::ItemKind;
 
     fn preview() -> RestorePreview {
@@ -224,5 +240,32 @@ mod tests {
     fn arch_warning_color_toggle() {
         assert!(format_arch_warning(&preview(), true).contains("\x1b["));
         assert!(!format_arch_warning(&preview(), false).contains("\x1b["));
+    }
+
+    fn volume_prompt() -> VolumeOverwritePrompt {
+        VolumeOverwritePrompt {
+            target: "pgdata".into(),
+            source: PathBuf::from("/backups/pgdata-20260926T141500Z.tar.bz2"),
+            created_at: datetime!(2026-09-26 14:15:00 UTC),
+        }
+    }
+
+    #[test]
+    fn volume_overwrite_prompt_names_the_volume_the_file_and_the_backup_time() {
+        assert_eq!(
+            format_volume_overwrite_prompt(&volume_prompt()),
+            "Volume pgdata will be emptied and refilled from \
+             /backups/pgdata-20260926T141500Z.tar.bz2 (backed up 2026-09-26 14:15 UTC). \
+             Continue? [y/N] "
+        );
+    }
+
+    #[test]
+    fn volume_overwrite_prompt_shows_the_backup_time_in_utc() {
+        let mut prompt = volume_prompt();
+        prompt.created_at = datetime!(2026-09-26 16:15:00 +02:00);
+        assert!(
+            format_volume_overwrite_prompt(&prompt).contains("(backed up 2026-09-26 14:15 UTC)")
+        );
     }
 }

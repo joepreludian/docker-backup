@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 
 use crate::domain::error::AppResult;
 use crate::domain::manifest::{Compression, DockerInfo, Sha256Digest, ToolInfo};
-use crate::domain::preview::RestorePreview;
+use crate::domain::preview::{RestorePreview, VolumeOverwritePrompt};
 use crate::domain::refs::{ContainerRef, ImageRef, ItemKind, VolumeRef};
 use crate::domain::report::ItemOutcome;
 
@@ -101,6 +101,8 @@ pub trait ConfirmPort {
     fn confirm_restore(&self, preview: &RestorePreview) -> AppResult<()>;
     /// Called only when `preview.mismatches` is not empty; asks "are you sure".
     fn confirm_arch_mismatch(&self, preview: &RestorePreview) -> AppResult<()>;
+    /// Called only when `restore-volume --overwrite` targets a volume that exists.
+    fn confirm_volume_overwrite(&self, prompt: &VolumeOverwritePrompt) -> AppResult<()>;
 }
 
 pub trait Clock {

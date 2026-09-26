@@ -50,3 +50,14 @@ impl RestorePreview {
         }
     }
 }
+
+/// What `restore-volume --overwrite` asks about before emptying an existing volume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeOverwritePrompt {
+    /// The volume that will be emptied and refilled.
+    pub target: String,
+    /// The archive it will be refilled from.
+    pub source: PathBuf,
+    /// When that archive was made.
+    pub created_at: OffsetDateTime,
+}

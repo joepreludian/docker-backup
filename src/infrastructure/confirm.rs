@@ -1,4 +1,4 @@
-//! Terminal confirmation prompts before restore.
+//! Terminal confirmation prompts before restore and restore-volume.
 //!
 //! Holds `input`/`output` in `RefCell`s rather than locking `Stdin`/`Stderr`
 //! for the run's duration: `StderrProgress`'s ticker thread writes to stderr
@@ -9,8 +9,10 @@ use std::io::{BufRead, Write};
 
 use crate::application::ports::ConfirmPort;
 use crate::domain::error::{AppError, AppResult};
-use crate::domain::preview::RestorePreview;
-use crate::presentation::{format_arch_warning, format_restore_preview};
+use crate::domain::preview::{RestorePreview, VolumeOverwritePrompt};
+use crate::presentation::{
+    format_arch_warning, format_restore_preview, format_volume_overwrite_prompt,
+};
 
 pub struct TerminalConfirm<R: BufRead, W: Write> {
     input: RefCell<R>,
@@ -79,6 +81,10 @@ impl<R: BufRead, W: Write> ConfirmPort for TerminalConfirm<R, W> {
         )?;
         self.ask("Are you sure? [y/N] ")
     }
+
+    fn confirm_volume_overwrite(&self, prompt: &VolumeOverwritePrompt) -> AppResult<()> {
+        self.ask(&format_volume_overwrite_prompt(prompt))
+    }
 }
 
 #[cfg(test)]
@@ -91,7 +97,7 @@ mod tests {
     use crate::application::ports::ConfirmPort;
     use crate::domain::error::AppError;
     use crate::domain::platform::Platform;
-    use crate::domain::preview::{MismatchedItem, RestorePreview};
+    use crate::domain::preview::{MismatchedItem, RestorePreview, VolumeOverwritePrompt};
     use crate::domain::refs::ItemKind;
 
     fn preview() -> RestorePreview {
@@ -164,5 +170,55 @@ mod tests {
         confirm.confirm_arch_mismatch(&preview()).unwrap();
         let output = String::from_utf8(confirm.output.into_inner()).unwrap();
         assert!(output.contains("Architecture mismatch"));
+    }
+
+    const VOLUME_QUESTION: &str = "Volume pgdata will be emptied and refilled from \
+        /backups/pgdata-20260926T141500Z.tar.bz2 (backed up 2026-09-26 14:15 UTC). \
+        Continue? [y/N] ";
+
+    fn volume_prompt() -> VolumeOverwritePrompt {
+        VolumeOverwritePrompt {
+            target: "pgdata".into(),
+            source: "/backups/pgdata-20260926T141500Z.tar.bz2".into(),
+            created_at: datetime!(2026-09-26 14:15:00 UTC),
+        }
+    }
+
+    #[test]
+    fn volume_overwrite_asks_the_question_and_accepts_yes() {
+        let confirm =
+            TerminalConfirm::new(Cursor::new(b"y\n".to_vec()), Vec::new(), false, true, false);
+        confirm.confirm_volume_overwrite(&volume_prompt()).unwrap();
+        let output = String::from_utf8(confirm.output.into_inner()).unwrap();
+        assert_eq!(output, VOLUME_QUESTION);
+    }
+
+    #[test]
+    fn volume_overwrite_declined_aborts() {
+        let confirm =
+            TerminalConfirm::new(Cursor::new(b"n\n".to_vec()), Vec::new(), false, true, false);
+        let error = confirm
+            .confirm_volume_overwrite(&volume_prompt())
+            .unwrap_err();
+        assert!(matches!(error, AppError::Aborted(_)));
+    }
+
+    #[test]
+    fn volume_overwrite_with_yes_answers_without_reading() {
+        let confirm = TerminalConfirm::new(Cursor::new(Vec::new()), Vec::new(), true, false, false);
+        confirm.confirm_volume_overwrite(&volume_prompt()).unwrap();
+        let output = String::from_utf8(confirm.output.into_inner()).unwrap();
+        assert_eq!(output, format!("{VOLUME_QUESTION}yes (--yes)\n"));
+    }
+
+    #[test]
+    fn volume_overwrite_without_a_terminal_aborts_with_a_hint() {
+        let confirm =
+            TerminalConfirm::new(Cursor::new(Vec::new()), Vec::new(), false, false, false);
+        let error = confirm
+            .confirm_volume_overwrite(&volume_prompt())
+            .unwrap_err();
+        assert!(matches!(&error, AppError::Aborted(_)));
+        assert!(error.to_string().contains("--yes"));
     }
 }
