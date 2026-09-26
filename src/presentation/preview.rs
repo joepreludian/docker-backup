@@ -87,6 +87,37 @@ pub fn format_restore_preview(preview: &RestorePreview, color: bool) -> String {
         Cell::new("Containers"),
         Cell::new(format!("{} to import", preview.containers_to_import)),
     ]);
+    if let Some(compose) = &preview.compose {
+        let project = match &compose.backup_project {
+            Some(from) if *from != compose.project => {
+                format!("{} (backup made from {from})", compose.project)
+            }
+            Some(_) => compose.project.clone(),
+            None => format!("{} (from a full backup)", compose.project),
+        };
+        table.add_row(vec![Cell::new("Compose project"), Cell::new(project)]);
+        if !compose.remaps.is_empty() {
+            let lines: Vec<String> = compose
+                .remaps
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{} {} → {}",
+                        r.kind.to_string().to_lowercase(),
+                        r.from,
+                        r.to
+                    )
+                })
+                .collect();
+            table.add_row(vec![Cell::new("Remapped"), Cell::new(lines.join("\n"))]);
+        }
+        if !compose.not_in_backup.is_empty() {
+            table.add_row(vec![
+                Cell::new("Not in backup"),
+                Cell::new(compose.not_in_backup.join(", ")),
+            ]);
+        }
+    }
     table.add_row(vec![
         Cell::new("Overwrite"),
         Cell::new(if preview.overwrite { "on" } else { "off" }),
@@ -154,7 +185,9 @@ mod tests {
 
     use super::*;
     use crate::domain::platform::Platform;
-    use crate::domain::preview::{MismatchedItem, RestorePreview, VolumeOverwritePrompt};
+    use crate::domain::preview::{
+        ComposePreview, MismatchedItem, Remap, RestorePreview, VolumeOverwritePrompt,
+    };
     use crate::domain::refs::ItemKind;
 
     fn preview() -> RestorePreview {
@@ -177,6 +210,69 @@ mod tests {
             }],
             compose: None,
         }
+    }
+
+    #[test]
+    fn preview_lists_the_compose_project_remaps_and_missing_volumes() {
+        let mut p = preview();
+        p.compose = Some(ComposePreview {
+            project: "shop2".into(),
+            backup_project: Some("shop".into()),
+            remaps: vec![
+                Remap {
+                    kind: ItemKind::Volume,
+                    from: "shop_appdata".into(),
+                    to: "shop2_appdata".into(),
+                },
+                Remap {
+                    kind: ItemKind::Image,
+                    from: "shop-app:latest".into(),
+                    to: "shop2-app:latest".into(),
+                },
+            ],
+            not_in_backup: vec!["shop2_cache".into()],
+        });
+        let text = format_restore_preview(&p, false);
+        assert!(text.contains("shop2 (backup made from shop)"), "{text}");
+        assert!(
+            text.contains("volume shop_appdata → shop2_appdata"),
+            "{text}"
+        );
+        assert!(
+            text.contains("image shop-app:latest → shop2-app:latest"),
+            "{text}"
+        );
+        assert!(text.contains("Not in backup"), "{text}");
+        assert!(text.contains("shop2_cache"), "{text}");
+    }
+
+    #[test]
+    fn preview_names_a_full_backup_and_the_same_project_plainly() {
+        let mut p = preview();
+        p.compose = Some(ComposePreview {
+            project: "shop".into(),
+            backup_project: None,
+            remaps: vec![],
+            not_in_backup: vec![],
+        });
+        let text = format_restore_preview(&p, false);
+        assert!(text.contains("shop (from a full backup)"), "{text}");
+        assert!(
+            !text.contains("Remapped") && !text.contains("Not in backup"),
+            "{text}"
+        );
+
+        p.compose.as_mut().unwrap().backup_project = Some("shop".into());
+        let text = format_restore_preview(&p, false);
+        assert!(
+            text.contains("Compose project") && !text.contains("made from"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn preview_without_compose_has_no_compose_rows() {
+        assert!(!format_restore_preview(&preview(), false).contains("Compose project"));
     }
 
     #[test]

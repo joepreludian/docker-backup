@@ -6,6 +6,7 @@ use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED}
 use console::style;
 
 use crate::domain::error::AppError;
+use crate::domain::refs::ItemKind;
 use crate::domain::report::{
     BackupReport, DoctorReport, InfoReport, ItemOutcome, ItemResult, RestoreReport,
     VolumeBackupReport, VolumeInfoReport, VolumeRestoreAction, VolumeRestoreReport, human_size,
@@ -67,9 +68,13 @@ impl HumanRenderer {
     fn items_table(&self, items: &[ItemResult]) -> Table {
         let mut table = self.table(&["Kind", "Name", "File", "Status"]);
         for item in items {
+            let name = match &item.target {
+                Some(target) => format!("{} → {target}", item.name),
+                None => item.name.clone(),
+            };
             table.add_row(vec![
                 Cell::new(item.kind.to_string()),
-                Cell::new(&item.name),
+                Cell::new(name),
                 Cell::new(item.file.as_deref().unwrap_or("-")),
                 self.outcome_cell(&item.outcome),
             ]);
@@ -78,9 +83,16 @@ impl HumanRenderer {
     }
 
     /// One row per checked file; both kinds of `info` draw their files with this.
-    fn verification_table(&self, verification: &VerificationReport) -> Table {
+    /// Volumes named in `external` are marked as such.
+    fn verification_table(&self, verification: &VerificationReport, external: &[&str]) -> Table {
         let mut files = self.table(&["Kind", "Name", "File", "Size", "Status"]);
         for check in &verification.files {
+            let name = if check.kind == ItemKind::Volume && external.contains(&check.name.as_str())
+            {
+                format!("{} (external)", check.name)
+            } else {
+                check.name.clone()
+            };
             let (label, tone) = match &check.status {
                 FileStatus::Ok => ("ok", Tone::Good),
                 FileStatus::Missing => ("missing", Tone::Bad),
@@ -88,7 +100,7 @@ impl HumanRenderer {
             };
             files.add_row(vec![
                 Cell::new(check.kind.to_string()),
-                Cell::new(check.name.clone()),
+                Cell::new(name),
                 Cell::new(check.file.clone()),
                 Cell::new(human_size(check.size_bytes)),
                 self.cell(label, tone),
@@ -118,6 +130,14 @@ fn outcome_tone(outcome: &ItemOutcome) -> Tone {
 impl Renderer for HumanRenderer {
     fn render_backup(&self, report: &BackupReport, out: &mut dyn Write) -> io::Result<()> {
         writeln!(out, "Backup written to {}", report.output.display())?;
+        if let Some(compose) = &report.compose {
+            writeln!(
+                out,
+                "Compose project {} ({})",
+                compose.project,
+                compose.files.join(", ")
+            )?;
+        }
         writeln!(out, "{}", self.items_table(&report.items))?;
         writeln!(
             out,
@@ -209,6 +229,16 @@ impl Renderer for HumanRenderer {
             Cell::new("Tool"),
             Cell::new(format!("{} {}", m.tool.name, m.tool.version)),
         ]);
+        if let Some(compose) = &m.compose {
+            meta.add_row(vec![
+                Cell::new("Compose project"),
+                Cell::new(format!(
+                    "{} ({})",
+                    compose.project,
+                    compose.files.join(", ")
+                )),
+            ]);
+        }
         meta.add_row(vec![
             Cell::new("Docker server"),
             Cell::new(&m.docker.server_version),
@@ -244,7 +274,17 @@ impl Renderer for HumanRenderer {
             Cell::new(human_size(m.total_bytes())),
         ]);
         writeln!(out, "{meta}")?;
-        writeln!(out, "{}", self.verification_table(&report.verification))?;
+        let external: Vec<&str> = m
+            .volumes
+            .iter()
+            .filter(|v| v.compose.as_ref().is_some_and(|c| c.external))
+            .map(|v| v.name.as_str())
+            .collect();
+        writeln!(
+            out,
+            "{}",
+            self.verification_table(&report.verification, &external)
+        )?;
         writeln!(out, "{}", report.verification.summary())
     }
 
@@ -269,7 +309,11 @@ impl Renderer for HumanRenderer {
         meta.add_row(vec![Cell::new("Size"), Cell::new(human_size(m.size_bytes))]);
         meta.add_row(vec![Cell::new("SHA-256"), Cell::new(m.sha256.to_string())]);
         writeln!(out, "{meta}")?;
-        writeln!(out, "{}", self.verification_table(&report.verification))
+        writeln!(
+            out,
+            "{}",
+            self.verification_table(&report.verification, &[])
+        )
     }
 
     fn render_doctor(&self, report: &DoctorReport, out: &mut dyn Write) -> io::Result<()> {

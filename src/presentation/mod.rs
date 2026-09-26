@@ -54,6 +54,7 @@ pub fn renderer_for(format: OutputFormat, color: bool) -> Box<dyn Renderer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::compose::{ComposeInfo, VolumeCompose};
     use crate::domain::error::AppError;
     use crate::domain::manifest::{
         Compression, DockerInfo, Manifest, Sha256Digest, ToolInfo, VolumeEntry,
@@ -247,6 +248,83 @@ mod tests {
         assert_eq!(value["error"]["kind"], "docker_unavailable");
         assert!(value["error"]["message"].as_str().unwrap().contains("down"));
         assert!(err.is_empty());
+    }
+
+    #[test]
+    fn json_omits_compose_fields_when_absent_and_includes_them_when_set() {
+        let plain = render_json(|r, out| r.render_backup(&backup_report(), out));
+        assert!(plain.get("compose").is_none(), "{plain}");
+        assert!(plain["items"][0].get("target").is_none(), "{plain}");
+
+        let mut report = backup_report();
+        report.compose = Some(ComposeInfo {
+            project: "shop".into(),
+            files: vec!["docker-compose.yml".into()],
+        });
+        report.items[0].target = Some("shop2_pgdata".into());
+        let value = render_json(|r, out| r.render_backup(&report, out));
+        assert_eq!(value["compose"]["project"], "shop");
+        assert_eq!(value["items"][0]["target"], "shop2_pgdata");
+    }
+
+    #[test]
+    fn human_backup_names_the_compose_project_and_not_found_items() {
+        let mut report = backup_report();
+        report.compose = Some(ComposeInfo {
+            project: "shop".into(),
+            files: vec!["docker-compose.yml".into(), "o.yml".into()],
+        });
+        report.items.push(ItemResult {
+            kind: ItemKind::Volume,
+            name: "shop_cache".into(),
+            target: None,
+            file: None,
+            outcome: ItemOutcome::SkippedNotFound,
+        });
+        let text = render_human(|r, out| r.render_backup(&report, out));
+        assert!(
+            text.contains("Compose project shop (docker-compose.yml, o.yml)"),
+            "{text}"
+        );
+        assert!(text.contains("skipped (not found)"), "{text}");
+    }
+
+    #[test]
+    fn human_restore_shows_remapped_targets() {
+        let report = RestoreReport {
+            source: "/b".into(),
+            preview: None,
+            items: vec![ItemResult {
+                kind: ItemKind::Volume,
+                name: "shop_appdata".into(),
+                target: Some("shop2_appdata".into()),
+                file: Some("volumes/shop_appdata.tar".into()),
+                outcome: ItemOutcome::Restored,
+            }],
+        };
+        let text = render_human(|r, out| r.render_restore(&report, out));
+        assert!(text.contains("shop_appdata → shop2_appdata"), "{text}");
+    }
+
+    #[test]
+    fn human_info_shows_compose_project_and_external_volumes() {
+        let mut report = info_report();
+        report.manifest.compose = Some(ComposeInfo {
+            project: "shop".into(),
+            files: vec!["docker-compose.yml".into()],
+        });
+        report.manifest.volumes[0].compose = Some(VolumeCompose {
+            key: "data".into(),
+            external: true,
+        });
+        let text = render_human(|r, out| r.render_info(&report, out));
+        assert!(text.contains("Compose project"), "{text}");
+        assert!(text.contains("shop (docker-compose.yml)"), "{text}");
+        assert!(text.contains("pgdata (external)"), "{text}");
+
+        let plain = render_human(|r, out| r.render_info(&info_report(), out));
+        assert!(!plain.contains("Compose project"), "{plain}");
+        assert!(!plain.contains("(external)"), "{plain}");
     }
 
     #[test]
