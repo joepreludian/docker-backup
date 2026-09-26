@@ -108,7 +108,9 @@ enum Tone {
 fn outcome_tone(outcome: &ItemOutcome) -> Tone {
     match outcome {
         ItemOutcome::Done { .. } | ItemOutcome::Restored => Tone::Good,
-        ItemOutcome::SkippedExisting | ItemOutcome::SkippedVolatile => Tone::Warn,
+        ItemOutcome::SkippedExisting
+        | ItemOutcome::SkippedVolatile
+        | ItemOutcome::SkippedNotFound => Tone::Warn,
         ItemOutcome::SkippedArchMismatch { .. } | ItemOutcome::Failed { .. } => Tone::Bad,
     }
 }

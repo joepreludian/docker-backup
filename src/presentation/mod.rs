@@ -81,6 +81,7 @@ mod tests {
                 server_version: "29.5.2".into(),
                 ..DockerInfo::default()
             },
+            compose: None,
             items: vec![
                 ItemResult {
                     kind: ItemKind::Volume,

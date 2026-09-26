@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::domain::compose::ComposeInfo;
 use crate::domain::manifest::{Compression, DockerInfo, Manifest, ToolInfo};
 use crate::domain::preview::RestorePreview;
 use crate::domain::refs::ItemKind;
@@ -14,12 +15,21 @@ use crate::domain::volume_manifest::VolumeManifest;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ItemOutcome {
-    Done { size_bytes: u64 },
+    Done {
+        size_bytes: u64,
+    },
     Restored,
     SkippedExisting,
     SkippedVolatile,
-    SkippedArchMismatch { platform: String, target: String },
-    Failed { error: String },
+    SkippedArchMismatch {
+        platform: String,
+        target: String,
+    },
+    /// Declared by the compose project but absent on the daemon. Not a failure.
+    SkippedNotFound,
+    Failed {
+        error: String,
+    },
 }
 
 impl ItemOutcome {
@@ -39,6 +49,7 @@ impl ItemOutcome {
             ItemOutcome::SkippedArchMismatch { platform, target } => {
                 format!("skipped (arch mismatch: {platform}, daemon is {target})")
             }
+            ItemOutcome::SkippedNotFound => "skipped (not found)".to_string(),
             ItemOutcome::Failed { error } => format!("failed ({error})"),
         }
     }
@@ -97,6 +108,9 @@ pub struct BackupReport {
     pub single_archive: bool,
     pub compression: Compression,
     pub docker: DockerInfo,
+    /// Set for `backup --from-docker-compose`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose: Option<ComposeInfo>,
     pub items: Vec<ItemResult>,
 }
 
@@ -286,6 +300,17 @@ mod tests {
     use time::macros::datetime;
 
     #[test]
+    fn skipped_not_found_is_not_a_failure() {
+        let outcome = ItemOutcome::SkippedNotFound;
+        assert_eq!(outcome.label(), "skipped (not found)");
+        assert!(!outcome.is_failure());
+        assert_eq!(
+            serde_json::to_value(&outcome).unwrap()["status"],
+            "skipped_not_found"
+        );
+    }
+
+    #[test]
     fn human_sizes() {
         assert_eq!(human_size(0), "0 B");
         assert_eq!(human_size(1023), "1023 B");
@@ -363,6 +388,7 @@ mod tests {
             single_archive: false,
             compression: Compression::None,
             docker: DockerInfo::default(),
+            compose: None,
             items: vec![ItemResult {
                 kind: ItemKind::Volume,
                 name: "v".into(),

@@ -174,6 +174,7 @@ impl BackupArgs {
                 Compression::None
             },
             single_archive: self.single_archive,
+            compose: None,
         }
     }
 }

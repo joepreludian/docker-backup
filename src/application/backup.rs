@@ -9,13 +9,14 @@ use crate::application::inventory::collect_inventory;
 use crate::application::ports::{
     ArchiveStore, Clock, DockerPort, Operation, ProgressSink, StoredFile,
 };
+use crate::domain::compose::ComposeProject;
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::manifest::{
     CONTAINERS_DIR, Compression, ContainerEntry, DockerInfo, IMAGES_DIR, ImageEntry, MANIFEST_FILE,
     Manifest, PARTIAL_MANIFEST_FILE, VOLUMES_DIR, VolumeEntry,
 };
 use crate::domain::naming::{FileNamer, archive_path, image_base_name, sanitize};
-use crate::domain::plan::{BackupPlan, BackupScope};
+use crate::domain::plan::{BackupPlan, BackupScope, ComposeScope};
 use crate::domain::platform::Platform;
 use crate::domain::refs::ItemKind;
 use crate::domain::report::{BackupReport, ItemOutcome, ItemResult};
@@ -26,6 +27,15 @@ pub struct BackupRequest {
     pub scope: BackupScope,
     pub compression: Compression,
     pub single_archive: bool,
+    /// `--from-docker-compose`: limit the backup to that project.
+    pub compose: Option<ComposeRequest>,
+}
+
+/// The compose files of one project, layered in order like `docker compose -f`.
+#[derive(Debug, Clone)]
+pub struct ComposeRequest {
+    pub files: Vec<PathBuf>,
+    pub include_external: bool,
 }
 
 pub struct BackupService<'a> {
@@ -39,8 +49,9 @@ impl BackupService<'_> {
     pub fn run(&self, request: &BackupRequest) -> AppResult<BackupReport> {
         let docker_info = self.docker.engine_info()?;
         docker_info.require_platform()?;
+        let scope = self.scope_for(request)?;
         let inventory = collect_inventory(self.docker)?;
-        let plan = BackupPlan::build(&inventory, &request.scope)?;
+        let plan = BackupPlan::build(&inventory, &scope)?;
         self.check_output_is_free(request)?;
 
         let output = request.output.clone();
@@ -68,6 +79,24 @@ impl BackupService<'_> {
             let _ = self.store.remove_dir_all(temp);
         }
         result
+    }
+
+    /// The request's scope, narrowed to the compose project when one was given.
+    fn scope_for(&self, request: &BackupRequest) -> AppResult<BackupScope> {
+        let mut scope = request.scope.clone();
+        if let Some(compose) = &request.compose {
+            let config = self.docker.compose_config(&compose.files)?;
+            scope.compose = Some(ComposeScope {
+                project: ComposeProject::from_config(&config)?,
+                files: compose
+                    .files
+                    .iter()
+                    .map(|f| f.display().to_string())
+                    .collect(),
+                include_external: compose.include_external,
+            });
+        }
+        Ok(scope)
     }
 
     /// Refuse to write where a backup already lives, rather than mixing two of them.
@@ -113,10 +142,17 @@ impl BackupService<'_> {
             docker_info.clone(),
             request.compression,
         );
+        manifest.compose = plan.compose.as_ref().map(|c| c.info.clone());
+        let not_found = plan
+            .compose
+            .as_ref()
+            .map(|c| c.not_found.as_slice())
+            .unwrap_or_default();
         let extension = request.compression.extension();
-        let mut items = Vec::with_capacity(plan.len());
+        let mut items = Vec::with_capacity(plan.len() + not_found.len());
         let mut index = 0;
-        self.progress.start(Operation::Backup, plan.len());
+        self.progress
+            .start(Operation::Backup, plan.len() + not_found.len());
 
         let mut namer = FileNamer::new();
         for volume in &plan.volumes {
@@ -143,7 +179,10 @@ impl BackupService<'_> {
                     sha256: stored.sha256.clone(),
                     volatile: volume.volatile,
                     inspect: inspect.clone(),
-                    compose: None,
+                    compose: plan
+                        .compose
+                        .as_ref()
+                        .and_then(|c| c.volumes.get(&volume.name).cloned()),
                 });
             }
             items.push(self.finish_item(
@@ -184,7 +223,10 @@ impl BackupService<'_> {
                     origin: image.origin,
                     platform: Platform::from_image_inspect(inspect),
                     inspect: inspect.clone(),
-                    compose: None,
+                    compose: plan
+                        .compose
+                        .as_ref()
+                        .and_then(|c| c.images.get(&image.id).cloned()),
                 });
             }
             items.push(self.finish_item(
@@ -236,6 +278,20 @@ impl BackupService<'_> {
             )?);
         }
 
+        // Declared by the compose project but absent on the daemon: reported, not exported.
+        for (kind, name) in not_found {
+            index += 1;
+            self.progress.item_started(*kind, name, index);
+            let outcome = ItemOutcome::SkippedNotFound;
+            self.progress.item_finished(*kind, name, &outcome);
+            items.push(ItemResult {
+                kind: *kind,
+                name: name.clone(),
+                file: None,
+                outcome,
+            });
+        }
+
         self.store
             .write_text(&work_dir.join(MANIFEST_FILE), &manifest.to_json()?)?;
         let partial = work_dir.join(PARTIAL_MANIFEST_FILE);
@@ -257,6 +313,7 @@ impl BackupService<'_> {
             single_archive: request.single_archive,
             compression: request.compression,
             docker: docker_info.clone(),
+            compose: manifest.compose.clone(),
             items,
         })
     }
@@ -350,7 +407,145 @@ mod tests {
             scope,
             compression: Compression::None,
             single_archive: false,
+            compose: None,
         }
+    }
+
+    fn shop_config() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../tests/fixtures/compose/shop.json")).unwrap()
+    }
+
+    fn compose_docker() -> FakeDocker {
+        FakeDocker::default()
+            .with_volume("shop_appdata", b"APPDATA")
+            .with_volume("company-shared", b"SHARED")
+            .with_volume("other_data", b"OTHER")
+            .with_image_tags(
+                &["shop-app:latest", "shop-worker:latest"],
+                ImageOrigin::Built,
+                b"APPIMAGE",
+            )
+            .with_image("postgres:17", ImageOrigin::Pulled, b"PG")
+            .with_image("other:latest", ImageOrigin::Built, b"OTHERIMAGE")
+            .with_compose(shop_config())
+    }
+
+    fn compose_request(include_external: bool) -> BackupRequest {
+        BackupRequest {
+            compose: Some(ComposeRequest {
+                files: vec![
+                    PathBuf::from("docker-compose.yml"),
+                    PathBuf::from("override.yml"),
+                ],
+                include_external,
+            }),
+            ..request(BackupScope::default())
+        }
+    }
+
+    #[test]
+    fn compose_backup_exports_only_the_project_and_records_it() {
+        let (docker, store, progress) = (
+            compose_docker(),
+            MemoryArchiveStore::new(),
+            RecordingProgress::default(),
+        );
+        let report = run(&docker, &store, &progress, &compose_request(true)).unwrap();
+
+        assert_eq!(
+            docker.compose_files.borrow()[0],
+            vec![
+                PathBuf::from("docker-compose.yml"),
+                PathBuf::from("override.yml")
+            ]
+        );
+        let summary: Vec<(ItemKind, &str, bool)> = report
+            .items
+            .iter()
+            .map(|i| (i.kind, i.name.as_str(), i.outcome.is_failure()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (ItemKind::Volume, "company-shared", false),
+                (ItemKind::Volume, "shop_appdata", false),
+                (ItemKind::Image, "shop-app:latest", false),
+                // not found, in project order: volumes by key, then build images
+                (ItemKind::Volume, "shop_cachedata", false),
+                (ItemKind::Volume, "shop_debugdata", false),
+                (ItemKind::Volume, "shop-pg-custom", false),
+                (ItemKind::Image, "registry.example.com/shop/api:1.2", false),
+            ]
+        );
+        assert!(
+            report.items[3..]
+                .iter()
+                .all(|i| i.outcome == ItemOutcome::SkippedNotFound && i.file.is_none())
+        );
+        assert_eq!(report.exit_code(), 0);
+        assert_eq!(report.compose.as_ref().unwrap().project, "shop");
+        assert!(
+            !docker.calls.borrow().iter().any(|c| c.contains("other")),
+            "{:?}",
+            docker.calls.borrow()
+        );
+        assert_eq!(progress.events.borrow().first().unwrap(), "start:BACKUP:7");
+
+        let manifest = manifest(&store, "/backups/out");
+        let compose = manifest.compose.unwrap();
+        assert_eq!(compose.project, "shop");
+        assert_eq!(compose.files, vec!["docker-compose.yml", "override.yml"]);
+        assert_eq!(manifest.volumes[0].name, "company-shared");
+        let shared = manifest.volumes[0].compose.as_ref().unwrap();
+        assert_eq!(shared.key, "shared");
+        assert!(shared.external);
+        assert_eq!(manifest.images[0].reference, "shop-app:latest");
+        assert_eq!(
+            manifest.images[0].compose.as_ref().unwrap().services,
+            vec!["app", "worker"]
+        );
+        assert!(manifest.containers.is_empty());
+    }
+
+    #[test]
+    fn compose_backup_without_external_volumes() {
+        let (docker, store, progress) = (
+            compose_docker(),
+            MemoryArchiveStore::new(),
+            RecordingProgress::default(),
+        );
+        let report = run(&docker, &store, &progress, &compose_request(false)).unwrap();
+        assert!(!report.items.iter().any(|i| i.name == "company-shared"));
+    }
+
+    #[test]
+    fn compose_backup_of_an_absent_project_writes_nothing() {
+        let docker = FakeDocker::default()
+            .with_volume("other_data", b"OTHER")
+            .with_compose(shop_config());
+        let (store, progress) = (MemoryArchiveStore::new(), RecordingProgress::default());
+        let err = run(&docker, &store, &progress, &compose_request(true)).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(!store.exists(Path::new("/backups/out/manifest.json")));
+        assert!(!store.exists(Path::new("/backups/out/manifest.partial.json")));
+        assert!(!store.exists(Path::new("/backups/out/volumes")));
+    }
+
+    #[test]
+    fn compose_backup_checks_docker_before_rendering() {
+        let docker = FakeDocker::unavailable().with_compose(shop_config());
+        let (store, progress) = (MemoryArchiveStore::new(), RecordingProgress::default());
+        let err = run(&docker, &store, &progress, &compose_request(true)).unwrap_err();
+        assert_eq!(err.exit_code(), 3);
+        assert!(docker.compose_files.borrow().is_empty());
+    }
+
+    #[test]
+    fn compose_file_rejected_by_compose_is_a_conflict() {
+        let docker = compose_docker().failing("compose_config");
+        let (store, progress) = (MemoryArchiveStore::new(), RecordingProgress::default());
+        let err = run(&docker, &store, &progress, &compose_request(true)).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
     }
 
     fn run(
