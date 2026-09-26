@@ -215,7 +215,8 @@ impl VolumeInfoReport {
 /// `info` reads both kinds of backup; each keeps its own report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Info {
-    Backup(InfoReport),
+    /// Boxed: a full manifest is far larger than a single volume's.
+    Backup(Box<InfoReport>),
     Volume(VolumeInfoReport),
 }
 
@@ -469,7 +470,7 @@ mod tests {
                 files: vec![file_check(FileStatus::Missing)],
             },
         };
-        assert_eq!(Info::Backup(backup).exit_code(), 1);
+        assert_eq!(Info::Backup(Box::new(backup)).exit_code(), 1);
     }
 
     #[test]

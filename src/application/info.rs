@@ -29,11 +29,11 @@ impl InfoService<'_> {
         if self.store.exists(&root.join(MANIFEST_FILE)) {
             let manifest = read_manifest(self.store, root)?;
             let verification = verify_files(self.store, root, &manifest)?;
-            return Ok(Info::Backup(InfoReport {
+            return Ok(Info::Backup(Box::new(InfoReport {
                 source: source.to_path_buf(),
                 manifest,
                 verification,
-            }));
+            })));
         }
         if self.store.exists(&root.join(VOLUME_MANIFEST_FILE)) {
             let (manifest, verification) = verify_volume_archive(self.store, root)?;
@@ -136,7 +136,7 @@ mod tests {
 
     fn backup_report(info: Info) -> InfoReport {
         match info {
-            Info::Backup(report) => report,
+            Info::Backup(report) => *report,
             other => panic!("expected a full backup, got {other:?}"),
         }
     }
