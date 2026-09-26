@@ -99,6 +99,43 @@ fn restore_help_lists_confirmation_flags() {
 }
 
 #[test]
+fn backup_and_restore_help_list_the_compose_flags() {
+    bin().args(["backup", "--help"]).assert().success().stdout(
+        predicate::str::contains("--from-docker-compose")
+            .and(predicate::str::contains("--no-external")),
+    );
+    bin()
+        .args(["restore", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--from-docker-compose"));
+}
+
+#[test]
+fn compose_flag_with_containers_is_a_usage_error() {
+    bin()
+        .args([
+            "backup",
+            "--from-docker-compose",
+            "c.yml",
+            "--containers",
+            "web",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn no_external_requires_the_compose_flag() {
+    bin()
+        .args(["backup", "--no-external"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--from-docker-compose"));
+}
+
+#[test]
 fn conflicting_compression_flags_are_a_usage_error() {
     bin()
         .args(["backup", "--per-file-bzip2", "--single-archive"])

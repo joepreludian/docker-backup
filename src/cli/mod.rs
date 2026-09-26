@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 use time::OffsetDateTime;
 
-use crate::application::backup::BackupRequest;
+use crate::application::backup::{BackupRequest, ComposeRequest};
 use crate::application::restore::RestoreRequest;
 use crate::application::volume::{VolumeBackupRequest, VolumeRestoreRequest};
 use crate::domain::manifest::Compression;
@@ -85,6 +85,20 @@ pub struct BackupArgs {
     /// Skip volumes.
     #[arg(long)]
     pub no_volumes: bool,
+    /// Compose file(s) of one project, layered in order like `docker compose -f`
+    /// (repeat the flag or separate with commas); limits the backup to that
+    /// project's volumes and locally built images.
+    #[arg(
+        long,
+        value_name = "FILE",
+        value_delimiter = ',',
+        action = clap::ArgAction::Append,
+        conflicts_with_all = ["containers", "include_volatile"]
+    )]
+    pub from_docker_compose: Vec<PathBuf>,
+    /// With --from-docker-compose: leave out the project's external volumes.
+    #[arg(long, requires = "from_docker_compose")]
+    pub no_external: bool,
 }
 
 #[derive(Debug, Args)]
@@ -115,6 +129,16 @@ pub struct RestoreArgs {
     /// Import images and container filesystems even when they were built for another os/arch.
     #[arg(long)]
     pub force_import_if_arch_mismatch: bool,
+    /// Compose file(s) of one project, layered in order like `docker compose -f`;
+    /// restores only what that project uses, under the names it uses now.
+    #[arg(
+        long,
+        value_name = "FILE",
+        value_delimiter = ',',
+        action = clap::ArgAction::Append,
+        conflicts_with = "include_volatile"
+    )]
+    pub from_docker_compose: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -174,7 +198,10 @@ impl BackupArgs {
                 Compression::None
             },
             single_archive: self.single_archive,
-            compose: None,
+            compose: (!self.from_docker_compose.is_empty()).then(|| ComposeRequest {
+                files: self.from_docker_compose.clone(),
+                include_external: !self.no_external,
+            }),
         }
     }
 }
@@ -193,7 +220,8 @@ impl RestoreArgs {
                 force_arch_mismatch: self.force_import_if_arch_mismatch,
             },
             verify: !self.skip_verify,
-            compose_files: None,
+            compose_files: (!self.from_docker_compose.is_empty())
+                .then(|| self.from_docker_compose.clone()),
         }
     }
 }
@@ -464,6 +492,134 @@ mod tests {
             panic!("expected restore-volume")
         };
         assert!(args.yes);
+    }
+
+    #[test]
+    fn from_docker_compose_takes_comma_lists_and_repeats_in_order() {
+        let cli = Cli::try_parse_from([
+            "docker-backup",
+            "backup",
+            "--from-docker-compose",
+            "docker-compose.yml,ops/a.yml",
+            "--from-docker-compose",
+            "ops/b.yml",
+            "--no-external",
+            "/tmp/out",
+        ])
+        .unwrap();
+        let Command::Backup(args) = cli.command else {
+            panic!("expected backup")
+        };
+        let request = args.to_request(datetime!(2026-09-26 00:00:00 UTC));
+        let compose = request.compose.unwrap();
+        assert_eq!(
+            compose.files,
+            vec![
+                PathBuf::from("docker-compose.yml"),
+                PathBuf::from("ops/a.yml"),
+                PathBuf::from("ops/b.yml")
+            ]
+        );
+        assert!(!compose.include_external);
+        assert_eq!(request.output, PathBuf::from("/tmp/out"));
+    }
+
+    #[test]
+    fn compose_backup_includes_external_volumes_by_default() {
+        let cli =
+            Cli::try_parse_from(["docker-backup", "backup", "--from-docker-compose", "c.yml"])
+                .unwrap();
+        let Command::Backup(args) = cli.command else {
+            panic!("expected backup")
+        };
+        let request = args.to_request(datetime!(2026-09-26 00:00:00 UTC));
+        assert!(request.compose.unwrap().include_external);
+    }
+
+    #[test]
+    fn backup_without_the_flag_has_no_compose_request() {
+        let cli = Cli::try_parse_from(["docker-backup", "backup"]).unwrap();
+        let Command::Backup(args) = cli.command else {
+            panic!("expected backup")
+        };
+        assert!(
+            args.to_request(datetime!(2026-09-26 00:00:00 UTC))
+                .compose
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn compose_flag_conflicts_and_requirements() {
+        use clap::error::ErrorKind;
+        for (argv, kind) in [
+            (
+                vec![
+                    "docker-backup",
+                    "backup",
+                    "--from-docker-compose",
+                    "c.yml",
+                    "--containers",
+                    "web",
+                ],
+                ErrorKind::ArgumentConflict,
+            ),
+            (
+                vec![
+                    "docker-backup",
+                    "backup",
+                    "--from-docker-compose",
+                    "c.yml",
+                    "--include-volatile",
+                ],
+                ErrorKind::ArgumentConflict,
+            ),
+            (
+                vec!["docker-backup", "backup", "--no-external"],
+                ErrorKind::MissingRequiredArgument,
+            ),
+            (
+                vec![
+                    "docker-backup",
+                    "restore",
+                    "--from-docker-compose",
+                    "c.yml",
+                    "--include-volatile",
+                    "b",
+                ],
+                ErrorKind::ArgumentConflict,
+            ),
+        ] {
+            let error = Cli::try_parse_from(argv.iter().copied()).unwrap_err();
+            assert_eq!(error.kind(), kind, "{argv:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn restore_carries_compose_files() {
+        let cli = Cli::try_parse_from([
+            "docker-backup",
+            "restore",
+            "--from-docker-compose",
+            "a.yml,b.yml",
+            "/b",
+        ])
+        .unwrap();
+        let Command::Restore(args) = cli.command else {
+            panic!("expected restore")
+        };
+        let request = args.to_request();
+        assert_eq!(
+            request.compose_files,
+            Some(vec![PathBuf::from("a.yml"), PathBuf::from("b.yml")])
+        );
+        assert_eq!(request.source, PathBuf::from("/b"));
+
+        let cli = Cli::try_parse_from(["docker-backup", "restore", "/b"]).unwrap();
+        let Command::Restore(args) = cli.command else {
+            panic!("expected restore")
+        };
+        assert_eq!(args.to_request().compose_files, None);
     }
 
     #[test]
