@@ -100,6 +100,7 @@ mod tests {
                 sha256: Sha256Digest::of(content),
                 volatile: false,
                 inspect: json!({}),
+                compose: None,
             });
         }
         m

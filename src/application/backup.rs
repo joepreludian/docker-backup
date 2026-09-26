@@ -143,6 +143,7 @@ impl BackupService<'_> {
                     sha256: stored.sha256.clone(),
                     volatile: volume.volatile,
                     inspect: inspect.clone(),
+                    compose: None,
                 });
             }
             items.push(self.finish_item(
@@ -183,6 +184,7 @@ impl BackupService<'_> {
                     origin: image.origin,
                     platform: Platform::from_image_inspect(inspect),
                     inspect: inspect.clone(),
+                    compose: None,
                 });
             }
             items.push(self.finish_item(

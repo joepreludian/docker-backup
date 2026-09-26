@@ -8,6 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
+use crate::domain::compose::{ComposeInfo, ImageCompose, VolumeCompose};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::platform::Platform;
 use crate::domain::refs::{ImageOrigin, ItemKind};
@@ -122,6 +123,9 @@ pub struct VolumeEntry {
     pub volatile: bool,
     #[serde(default)]
     pub inspect: Value,
+    /// Set when the backup was made with `--from-docker-compose`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose: Option<VolumeCompose>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +142,9 @@ pub struct ImageEntry {
     pub platform: Option<Platform>,
     #[serde(default)]
     pub inspect: Value,
+    /// Set when the backup was made with `--from-docker-compose`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose: Option<ImageCompose>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +181,9 @@ pub struct Manifest {
     pub docker: DockerInfo,
     pub compression: Compression,
     pub hash_algorithm: String,
+    /// Set when the backup was made with `--from-docker-compose`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose: Option<ComposeInfo>,
     #[serde(default)]
     pub volumes: Vec<VolumeEntry>,
     #[serde(default)]
@@ -191,6 +201,7 @@ impl Manifest {
             docker,
             compression,
             hash_algorithm: HASH_ALGORITHM.to_string(),
+            compose: None,
             volumes: Vec::new(),
             images: Vec::new(),
             containers: Vec::new(),
@@ -226,6 +237,7 @@ impl Manifest {
     /// Reject anything a hostile manifest could use to write outside the backup
     /// folder or to name a docker object we would then hand to the CLI.
     pub fn validate(&self) -> AppResult<()> {
+        self.validate_compose()?;
         for volume in &self.volumes {
             check_docker_name("volume", &volume.name)?;
             check_file("volume", &volume.name, &volume.file)?;
@@ -236,6 +248,38 @@ impl Manifest {
         for container in &self.containers {
             check_docker_name("container", &container.name)?;
             check_file("container", &container.name, &container.file)?;
+        }
+        Ok(())
+    }
+
+    /// Compose metadata is optional, but when present it must name something.
+    fn validate_compose(&self) -> AppResult<()> {
+        if let Some(compose) = &self.compose
+            && compose.project.is_empty()
+        {
+            return Err(AppError::ManifestInvalid(
+                "compose project name is empty".into(),
+            ));
+        }
+        for volume in &self.volumes {
+            if let Some(compose) = &volume.compose
+                && compose.key.is_empty()
+            {
+                return Err(AppError::ManifestInvalid(format!(
+                    "volume {:?} has an empty compose key",
+                    volume.name
+                )));
+            }
+        }
+        for image in &self.images {
+            if let Some(compose) = &image.compose
+                && (compose.services.is_empty() || compose.services.iter().any(String::is_empty))
+            {
+                return Err(AppError::ManifestInvalid(format!(
+                    "image {:?} has an empty compose service list or name",
+                    image.reference
+                )));
+            }
         }
         Ok(())
     }
@@ -340,6 +384,79 @@ mod tests {
     use serde_json::json;
     use time::macros::datetime;
 
+    fn compose_sample() -> Manifest {
+        let mut manifest = sample();
+        manifest.compose = Some(ComposeInfo {
+            project: "shop".into(),
+            files: vec!["docker-compose.yml".into(), "override.yml".into()],
+        });
+        manifest.volumes[0].compose = Some(VolumeCompose {
+            key: "pgdata".into(),
+            external: false,
+        });
+        manifest.images[0].compose = Some(ImageCompose {
+            services: vec!["app".into(), "worker".into()],
+        });
+        manifest
+    }
+
+    #[test]
+    fn compose_fields_round_trip() {
+        let manifest = compose_sample();
+        let json = manifest.to_json().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["compose"]["project"], "shop");
+        assert_eq!(value["volumes"][0]["compose"]["key"], "pgdata");
+        assert_eq!(value["images"][0]["compose"]["services"][1], "worker");
+        assert_eq!(Manifest::from_json(&json).unwrap(), manifest);
+    }
+
+    #[test]
+    fn full_backup_manifest_has_no_compose_keys() {
+        let json = sample().to_json().unwrap();
+        assert!(!json.contains("compose"), "{json}");
+    }
+
+    #[test]
+    fn manifest_without_compose_fields_still_parses() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&compose_sample().to_json().unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("compose");
+        value["volumes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("compose");
+        let parsed = Manifest::from_json(&value.to_string()).unwrap();
+        assert!(parsed.compose.is_none());
+        assert!(parsed.volumes[0].compose.is_none());
+    }
+
+    #[test]
+    fn validate_rejects_empty_compose_metadata() {
+        let mut m = compose_sample();
+        m.compose.as_mut().unwrap().project.clear();
+        assert!(matches!(m.validate(), Err(AppError::ManifestInvalid(_))));
+
+        let mut m = compose_sample();
+        m.volumes[0].compose.as_mut().unwrap().key.clear();
+        assert!(matches!(m.validate(), Err(AppError::ManifestInvalid(_))));
+
+        let mut m = compose_sample();
+        m.images[0].compose.as_mut().unwrap().services.clear();
+        assert!(matches!(m.validate(), Err(AppError::ManifestInvalid(_))));
+
+        let mut m = compose_sample();
+        m.images[0]
+            .compose
+            .as_mut()
+            .unwrap()
+            .services
+            .push(String::new());
+        assert!(matches!(m.validate(), Err(AppError::ManifestInvalid(_))));
+
+        assert!(compose_sample().validate().is_ok());
+    }
+
     fn sample() -> Manifest {
         let mut manifest = Manifest::new(
             datetime!(2026-09-19 14:03:11 UTC),
@@ -360,6 +477,7 @@ mod tests {
             sha256: Sha256Digest::of(b"abc"),
             volatile: false,
             inspect: json!({"Name": "pgdata"}),
+            compose: None,
         });
         manifest.images.push(ImageEntry {
             reference: "app:latest".into(),
@@ -370,6 +488,7 @@ mod tests {
             origin: ImageOrigin::Built,
             platform: None,
             inspect: json!({}),
+            compose: None,
         });
         manifest.containers.push(ContainerEntry {
             name: "web".into(),
@@ -537,6 +656,7 @@ mod tests {
             origin: ImageOrigin::Built,
             platform: None,
             inspect: json!({}),
+            compose: None,
         });
         m.images.push(ImageEntry {
             reference: "b:1".into(),
@@ -547,6 +667,7 @@ mod tests {
             origin: ImageOrigin::Built,
             platform: Some(Platform::new("linux", "arm64")),
             inspect: json!({}),
+            compose: None,
         });
         assert_eq!(
             m.image_platform(&m.images[0]),

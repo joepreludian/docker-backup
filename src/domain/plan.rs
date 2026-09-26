@@ -449,6 +449,7 @@ mod tests {
                 sha256: Sha256Digest::of(b"x"),
                 volatile,
                 inspect: json!({}),
+                compose: None,
             });
         }
         m.images.push(ImageEntry {
@@ -460,6 +461,7 @@ mod tests {
             origin: ImageOrigin::Built,
             platform: Some(Platform::new("linux", "amd64")),
             inspect: json!({}),
+            compose: None,
         });
         m.containers.push(ContainerEntry {
             name: "web".into(),
@@ -566,6 +568,7 @@ mod tests {
             origin: ImageOrigin::Built,
             platform: None,
             inspect: json!({}),
+            compose: None,
         });
         m.containers.push(ContainerEntry {
             name: "web".into(),

@@ -260,6 +260,7 @@ mod tests {
                 sha256: Sha256Digest::of(content),
                 volatile,
                 inspect: json!({}),
+                compose: None,
             });
         }
         store.put("/b/images/app_latest.tar", b"APPIMAGE");
@@ -272,6 +273,7 @@ mod tests {
             origin: ImageOrigin::Built,
             platform: Some(Platform::new("linux", "arm64")),
             inspect: json!({}),
+            compose: None,
         });
         store.put("/b/containers/web.tar", b"WEBFS");
         m.containers.push(ContainerEntry {

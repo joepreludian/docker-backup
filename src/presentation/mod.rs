@@ -113,6 +113,7 @@ mod tests {
             sha256: Sha256Digest::of(b"abc"),
             volatile: false,
             inspect: json!({}),
+            compose: None,
         });
         InfoReport {
             source: "/backups/out".into(),

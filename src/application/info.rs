@@ -80,6 +80,7 @@ mod tests {
                 sha256: Sha256Digest::of(name.to_uppercase().as_bytes()),
                 volatile: false,
                 inspect: json!({}),
+                compose: None,
             });
         }
         store
