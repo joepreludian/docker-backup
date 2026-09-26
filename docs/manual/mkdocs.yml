@@ -49,6 +49,7 @@ nav:
   - How to back up: backup.md
   - How to restore: restore.md
   - Single volumes: volumes.md
+  - Compose projects: compose.md
 
 markdown_extensions:
   - abbr

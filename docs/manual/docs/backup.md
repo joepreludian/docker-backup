@@ -4,15 +4,18 @@
 docker-backup backup [OUTPUT] [--all-images] [--include-volatile]
                      [--containers NAME]... [--per-file-bzip2 | --single-archive]
                      [--no-images] [--no-volumes]
+                     [--from-docker-compose FILE[,FILE...] [--no-external]]
 ```
 
 `OUTPUT` defaults to `./docker-backup-<UTC timestamp>`, for example
 `docker-backup-20260920T091244Z`.
 
-!!! tip "Just one volume?"
+!!! tip "Just one volume, or one compose project?"
 
-    `backup` always captures the whole daemon. To back up a single volume into
-    its own archive, use [`backup-volume`](volumes.md) instead.
+    `backup` captures the whole daemon. To back up a single volume into its own
+    archive, use [`backup-volume`](volumes.md). To back up only what one
+    compose project uses, pass its files with
+    [`--from-docker-compose`](compose.md).
 
 ## What gets captured by default
 
@@ -245,7 +248,9 @@ The archive is unpacked into a temporary directory beside itself, so that
 filesystem needs roughly twice the archive's size free.
 
 `info` also reads the single-volume archives that `backup-volume` writes — see
-[Check an archive](volumes.md#check-an-archive).
+[Check an archive](volumes.md#check-an-archive). For a backup made with
+`--from-docker-compose` it adds a *Compose project* row and marks external
+volumes — see [In the manifest](compose.md#in-the-manifest).
 
 ## Before you back up stateful services
 

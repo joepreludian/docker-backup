@@ -130,6 +130,8 @@ for confirmation before making a single change.
   architecture check, and `--overwrite`.
 - **[Single volumes](volumes.md)** — back up one volume into its own archive,
   and restore it under any name.
+- **[Compose projects](compose.md)** — back up and restore only what one
+  compose project uses, even into a renamed project.
 
 ## Licence
 

@@ -5,6 +5,7 @@ docker-backup restore <SOURCE> [--overwrite] [--include-volatile]
                       [--container-tag TAG] [--no-images] [--no-volumes]
                       [--no-containers] [--skip-verify] [--yes | -y]
                       [--force-import-if-arch-mismatch]
+                      [--from-docker-compose FILE[,FILE...]]
 ```
 
 `SOURCE` is either a backup folder or a `.tar.bz2` produced by
@@ -16,6 +17,12 @@ itself, which needs roughly twice its size free.
     A single-volume archive from `backup-volume` is restored with
     [`restore-volume`](volumes.md#restore-a-volume), which can also restore it
     under another name. `restore` refuses such an archive and says so.
+
+!!! tip "Restoring into a compose project"
+
+    With [`--from-docker-compose`](compose.md#restore-into-a-project), `restore`
+    puts back only what that project uses, under the names the project uses
+    now — even when its folder, and so its project name, has changed.
 
 ## What happens, in order
 

@@ -62,9 +62,11 @@ Requires `docker`, `tar`, and (for bzip2 options) `bzip2` on PATH.
     docker-backup backup [OUTPUT_DIR] [--all-images] [--include-volatile]
                          [--containers NAME]... [--per-file-bzip2 | --single-archive]
                          [--no-images] [--no-volumes]
+                         [--from-docker-compose FILE[,FILE...] [--no-external]]
     docker-backup restore <BACKUP_DIR | archive.tar.bz2> [--overwrite] [--include-volatile]
                          [--container-tag TAG] [--no-images] [--no-volumes] [--no-containers]
                          [--skip-verify] [--yes | -y] [--force-import-if-arch-mismatch]
+                         [--from-docker-compose FILE[,FILE...]]
     docker-backup backup-volume <NAME>... [-o, --output-dir DIR]
     docker-backup restore-volume <FILE> [--as NAME] [--overwrite] [--yes | -y]
     docker-backup info    <BACKUP_DIR | archive.tar.bz2 | volume archive>
@@ -127,6 +129,15 @@ always verifies it, and restores it into a volume that does not exist yet, under
 its original name or `--as` another. An existing volume is replaced only with
 `--overwrite`, after a prompt (or `--yes`), and only that one volume. `info`
 reads these archives too. See the manual's *Single volumes* page.
+
+`--from-docker-compose FILE[,FILE...]` limits `backup` and `restore` to one
+compose project. The files are layered in order, like `docker compose -f`, and
+rendered by `docker compose config`. Backup takes the project's named volumes
+(external ones too, unless `--no-external`) and its locally built images, never
+containers. Restore puts back only what the project uses, matching volumes by
+their compose key so a project whose folder was renamed still gets its data, and
+re-tags built images for the project's current names. The manifest records the
+project in a `compose` block. See the manual's *Compose projects* page.
 
 ## Backup layout
 
