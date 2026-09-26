@@ -7,13 +7,17 @@ use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
 use crate::application::ports::{
-    ArchiveStore, Clock, DockerPort, Operation, ProgressSink, StoredFile,
+    ArchiveStore, Clock, ConfirmPort, DockerPort, Operation, ProgressSink, StoredFile,
 };
+use crate::application::verify::locate_backup;
 use crate::domain::error::{AppError, AppResult};
-use crate::domain::manifest::Compression;
-use crate::domain::naming::{ARCHIVE_SUFFIX, utc_stamp, volume_archive_stem};
+use crate::domain::manifest::{Compression, MANIFEST_FILE, is_docker_name};
+use crate::domain::naming::{ARCHIVE_SUFFIX, is_archive, utc_stamp, volume_archive_stem};
+use crate::domain::preview::VolumeOverwritePrompt;
 use crate::domain::refs::ItemKind;
-use crate::domain::report::{ItemOutcome, ItemResult, VolumeBackupReport};
+use crate::domain::report::{
+    ItemOutcome, ItemResult, VolumeBackupReport, VolumeRestoreAction, VolumeRestoreReport,
+};
 use crate::domain::verification::{FileCheck, FileStatus, VerificationReport};
 use crate::domain::volume_manifest::{VOLUME_DATA_FILE, VOLUME_MANIFEST_FILE, VolumeManifest};
 
@@ -188,11 +192,156 @@ fn refuse_case_collisions(names: &[&str]) -> AppResult<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct VolumeRestoreRequest {
+    pub source: PathBuf,
+    /// `--as`: restore into this volume instead of the one the archive names.
+    pub target: Option<String>,
+    pub overwrite: bool,
+}
+
+pub struct VolumeRestoreService<'a> {
+    pub docker: &'a dyn DockerPort,
+    pub store: &'a dyn ArchiveStore,
+    pub progress: &'a dyn ProgressSink,
+    pub confirm: &'a dyn ConfirmPort,
+}
+
+impl VolumeRestoreService<'_> {
+    pub fn run(&self, request: &VolumeRestoreRequest) -> AppResult<VolumeRestoreReport> {
+        if !is_archive(&request.source) {
+            return Err(AppError::Conflict(format!(
+                "{} is not a .tar.bz2 archive",
+                request.source.display()
+            )));
+        }
+        if let Some(target) = &request.target
+            && !is_docker_name(target)
+        {
+            return Err(AppError::Conflict(format!(
+                "{target:?} is not a valid volume name"
+            )));
+        }
+        let located = locate_backup(self.store, &request.source)?;
+        let result = self.run_in(&located.root, request);
+        located.cleanup(self.store);
+        result
+    }
+
+    fn run_in(
+        &self,
+        root: &Path,
+        request: &VolumeRestoreRequest,
+    ) -> AppResult<VolumeRestoreReport> {
+        let (manifest, verification) = self.read_archive(root, &request.source)?;
+        if !verification.is_ok() {
+            return Err(AppError::VerificationFailed {
+                missing: verification.missing_count(),
+                corrupt: verification.corrupt_count(),
+            });
+        }
+        let target = request
+            .target
+            .clone()
+            .unwrap_or_else(|| manifest.volume.clone());
+
+        self.docker.engine_info()?;
+        let exists = self
+            .docker
+            .list_volumes()?
+            .iter()
+            .any(|volume| volume.name == target);
+        if exists && !request.overwrite {
+            return Err(AppError::Conflict(format!(
+                "volume {target} already exists; pass --overwrite to replace its contents"
+            )));
+        }
+        if exists {
+            self.confirm
+                .confirm_volume_overwrite(&VolumeOverwritePrompt {
+                    target: target.clone(),
+                    source: request.source.clone(),
+                    created_at: manifest.created_at,
+                })?;
+        }
+        self.docker.ensure_helper_image()?;
+
+        self.progress.start(Operation::Restore, 1);
+        self.progress.item_started(ItemKind::Volume, &target, 1);
+        let (created, filled) = self.fill(root, &target, exists);
+        let outcome = match filled {
+            Ok(()) => ItemOutcome::Done {
+                size_bytes: manifest.size_bytes,
+            },
+            Err(error) => ItemOutcome::Failed {
+                error: error.to_string(),
+            },
+        };
+        self.progress
+            .item_finished(ItemKind::Volume, &target, &outcome);
+        self.progress.finish();
+
+        let hint = (created && outcome.is_failure()).then(|| {
+            format!(
+                "volume {target} was created and may be partially filled; retry with --overwrite"
+            )
+        });
+        Ok(VolumeRestoreReport {
+            source: request.source.clone(),
+            volume: manifest.volume,
+            target,
+            created_at: manifest.created_at,
+            action: if exists {
+                VolumeRestoreAction::Overwrite
+            } else {
+                VolumeRestoreAction::Create
+            },
+            outcome,
+            hint,
+        })
+    }
+
+    /// `volume.json` makes this a single-volume archive; `manifest.json` means
+    /// the user wants `restore`; anything else is not an archive of ours.
+    fn read_archive(
+        &self,
+        root: &Path,
+        source: &Path,
+    ) -> AppResult<(VolumeManifest, VerificationReport)> {
+        if self.store.exists(&root.join(VOLUME_MANIFEST_FILE)) {
+            return verify_volume_archive(self.store, root);
+        }
+        if self.store.exists(&root.join(MANIFEST_FILE)) {
+            return Err(AppError::ManifestInvalid(format!(
+                "{} is a full backup; use `docker-backup restore`",
+                source.display()
+            )));
+        }
+        Err(AppError::ManifestInvalid(format!(
+            "no {VOLUME_MANIFEST_FILE} in {}",
+            source.display()
+        )))
+    }
+
+    /// Creates the volume unless it exists, then streams `backup.tar` into it,
+    /// emptying it first when it existed. Also says whether this run created it.
+    fn fill(&self, root: &Path, target: &str, exists: bool) -> (bool, AppResult<()>) {
+        if !exists && let Err(error) = self.docker.create_volume(target) {
+            return (false, Err(error));
+        }
+        let filled = self
+            .store
+            .open_item(&root.join(VOLUME_DATA_FILE), Compression::None)
+            .and_then(|mut reader| self.docker.import_volume(target, &mut reader, exists));
+        (!exists, filled)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::application::fakes::{
-        FakeDocker, FixedClock, MemoryArchiveStore, RecordingProgress,
+        FakeConfirm, FakeDocker, FixedClock, MemoryArchiveStore, RecordingProgress,
     };
     use crate::domain::manifest::{Sha256Digest, ToolMeta};
     use time::macros::datetime;
@@ -490,5 +639,526 @@ mod tests {
                 "finish",
             ]
         );
+    }
+
+    fn restore_request(target: Option<&str>, overwrite: bool) -> VolumeRestoreRequest {
+        VolumeRestoreRequest {
+            source: PathBuf::from(PGDATA_ARCHIVE),
+            target: target.map(String::from),
+            overwrite,
+        }
+    }
+
+    fn restore(
+        docker: &FakeDocker,
+        store: &MemoryArchiveStore,
+        progress: &RecordingProgress,
+        confirm: &FakeConfirm,
+        request: &VolumeRestoreRequest,
+    ) -> AppResult<VolumeRestoreReport> {
+        VolumeRestoreService {
+            docker,
+            store,
+            progress,
+            confirm,
+        }
+        .run(request)
+    }
+
+    /// Writes `files` into /work/pgdata-20260926T141500Z/ and packs that folder
+    /// into PGDATA_ARCHIVE, the layout backup-volume writes.
+    fn pack_archive(store: &MemoryArchiveStore, files: &[(&str, &[u8])]) {
+        let folder = Path::new("/work/pgdata-20260926T141500Z");
+        for (name, bytes) in files {
+            store.put(folder.join(name), bytes);
+        }
+        store
+            .pack_folder(folder, Path::new(PGDATA_ARCHIVE))
+            .unwrap();
+        store.remove_dir_all(Path::new("/work")).unwrap();
+    }
+
+    fn manifest_for(volume: &str, data: &[u8]) -> String {
+        VolumeManifest::new(volume, NOW, data.len() as u64, Sha256Digest::of(data))
+            .to_json()
+            .unwrap()
+    }
+
+    /// An intact archive of the volume `pgdata` holding b"PG".
+    fn intact_archive() -> MemoryArchiveStore {
+        let store = MemoryArchiveStore::new();
+        let json = manifest_for("pgdata", b"PG");
+        pack_archive(
+            &store,
+            &[("volume.json", json.as_bytes()), ("backup.tar", b"PG")],
+        );
+        store
+    }
+
+    /// The docker calls that change something.
+    fn docker_writes(docker: &FakeDocker) -> Vec<String> {
+        calls(docker)
+            .into_iter()
+            .filter(|c| c.starts_with("create_volume") || c.starts_with("import_volume"))
+            .collect()
+    }
+
+    #[test]
+    fn a_new_volume_is_created_and_filled_without_a_prompt() {
+        let store = intact_archive();
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let report = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, false),
+        )
+        .unwrap();
+        assert_eq!(
+            report,
+            VolumeRestoreReport {
+                source: PathBuf::from(PGDATA_ARCHIVE),
+                volume: "pgdata".into(),
+                target: "pgdata".into(),
+                created_at: NOW,
+                action: VolumeRestoreAction::Create,
+                outcome: ItemOutcome::Done { size_bytes: 2 },
+                hint: None,
+            }
+        );
+        assert_eq!(report.exit_code(), 0);
+        assert_eq!(docker.volumes.borrow()["pgdata"], b"PG");
+        assert_eq!(
+            docker_writes(&docker),
+            vec!["create_volume:pgdata", "import_volume:pgdata:wipe=false"]
+        );
+        assert!(calls(&docker).contains(&"ensure_helper_image".to_string()));
+        assert!(confirm.asked.borrow().is_empty());
+        assert_eq!(
+            *progress.events.borrow(),
+            vec![
+                "start:RESTORE:1",
+                "started:VOLUME:pgdata:1",
+                "finished:VOLUME:pgdata:done (2 B)",
+                "finish",
+            ]
+        );
+        assert!(no_scratch_left(&store));
+    }
+
+    #[test]
+    fn an_existing_volume_without_overwrite_is_a_conflict() {
+        let store = intact_archive();
+        let (docker, progress, confirm) = (
+            FakeDocker::default().with_volume("pgdata", b"OLD"),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let err = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, false),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "volume pgdata already exists; pass --overwrite to replace its contents"
+        );
+        assert!(docker_writes(&docker).is_empty());
+        assert_eq!(docker.volumes.borrow()["pgdata"], b"OLD");
+        assert!(confirm.asked.borrow().is_empty());
+        assert!(no_scratch_left(&store));
+    }
+
+    #[test]
+    fn overwrite_asks_then_empties_and_refills_the_volume() {
+        let store = intact_archive();
+        let (docker, progress, confirm) = (
+            FakeDocker::default().with_volume("pgdata", b"OLD"),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let report = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, true),
+        )
+        .unwrap();
+        assert_eq!(report.action, VolumeRestoreAction::Overwrite);
+        assert_eq!(report.outcome, ItemOutcome::Done { size_bytes: 2 });
+        assert_eq!(docker.volumes.borrow()["pgdata"], b"PG");
+        assert_eq!(
+            docker_writes(&docker),
+            vec!["import_volume:pgdata:wipe=true"]
+        );
+        assert_eq!(
+            *confirm.volume_prompts.borrow(),
+            vec![VolumeOverwritePrompt {
+                target: "pgdata".into(),
+                source: PathBuf::from(PGDATA_ARCHIVE),
+                created_at: NOW,
+            }]
+        );
+        assert!(no_scratch_left(&store));
+    }
+
+    #[test]
+    fn declining_the_overwrite_aborts_without_writing() {
+        let store = intact_archive();
+        let (docker, progress, confirm) = (
+            FakeDocker::default().with_volume("pgdata", b"OLD"),
+            RecordingProgress::default(),
+            FakeConfirm::declining_volume_overwrite(),
+        );
+        let err = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, true),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(matches!(err, AppError::Aborted(_)));
+        assert!(docker_writes(&docker).is_empty());
+        assert_eq!(docker.volumes.borrow()["pgdata"], b"OLD");
+        assert!(no_scratch_left(&store));
+    }
+
+    #[test]
+    fn as_restores_into_another_volume_and_leaves_the_original_alone() {
+        let store = intact_archive();
+        let (docker, progress, confirm) = (
+            FakeDocker::default().with_volume("pgdata", b"LIVE"),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let report = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(Some("pgdata2"), false),
+        )
+        .unwrap();
+        assert_eq!(
+            (report.volume.as_str(), report.target.as_str()),
+            ("pgdata", "pgdata2")
+        );
+        assert_eq!(report.action, VolumeRestoreAction::Create);
+        assert_eq!(docker.volumes.borrow()["pgdata2"], b"PG");
+        assert_eq!(docker.volumes.borrow()["pgdata"], b"LIVE");
+    }
+
+    #[test]
+    fn an_as_name_docker_would_refuse_is_rejected_before_unpacking() {
+        let store = intact_archive();
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        for bad in ["a/b", "-x", ""] {
+            let err = restore(
+                &docker,
+                &store,
+                &progress,
+                &confirm,
+                &restore_request(Some(bad), false),
+            )
+            .unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{bad:?}");
+            assert!(err.to_string().contains("not a valid volume name"), "{err}");
+        }
+        assert!(store.unpacked.borrow().is_empty());
+        assert!(calls(&docker).is_empty());
+    }
+
+    #[test]
+    fn an_archive_without_volume_json_is_invalid() {
+        let store = MemoryArchiveStore::new();
+        pack_archive(&store, &[("notes.txt", b"hi")]);
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let err = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, false),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, AppError::ManifestInvalid(msg) if *msg == format!("no volume.json in {PGDATA_ARCHIVE}")),
+            "{err:?}"
+        );
+        assert!(calls(&docker).is_empty());
+        assert!(no_scratch_left(&store));
+    }
+
+    #[test]
+    fn a_full_backup_points_to_restore() {
+        let store = MemoryArchiveStore::new();
+        pack_archive(&store, &[("manifest.json", b"{}")]);
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let err = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, false),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, AppError::ManifestInvalid(msg) if *msg == format!("{PGDATA_ARCHIVE} is a full backup; use `docker-backup restore`")),
+            "{err:?}"
+        );
+        assert!(calls(&docker).is_empty());
+    }
+
+    #[test]
+    fn a_volume_json_naming_a_volume_docker_would_refuse_is_invalid() {
+        let store = MemoryArchiveStore::new();
+        let json = manifest_for("/", b"PG");
+        pack_archive(
+            &store,
+            &[("volume.json", json.as_bytes()), ("backup.tar", b"PG")],
+        );
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let err = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, false),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::ManifestInvalid(_)));
+        assert!(calls(&docker).is_empty());
+    }
+
+    #[test]
+    fn a_checksum_mismatch_fails_verification_before_docker_is_touched() {
+        let store = MemoryArchiveStore::new();
+        let json = manifest_for("pgdata", b"PG");
+        pack_archive(
+            &store,
+            &[
+                ("volume.json", json.as_bytes()),
+                ("backup.tar", b"TAMPERED"),
+            ],
+        );
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let err = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, false),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::VerificationFailed {
+                missing: 0,
+                corrupt: 1
+            }
+        ));
+        assert!(calls(&docker).is_empty());
+        assert!(confirm.asked.borrow().is_empty());
+        assert!(no_scratch_left(&store));
+    }
+
+    #[test]
+    fn a_missing_backup_tar_fails_verification_before_docker_is_touched() {
+        let store = MemoryArchiveStore::new();
+        let json = manifest_for("pgdata", b"PG");
+        pack_archive(&store, &[("volume.json", json.as_bytes())]);
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let err = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, false),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::VerificationFailed {
+                missing: 1,
+                corrupt: 0
+            }
+        ));
+        assert!(calls(&docker).is_empty());
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_tar_bz2_is_refused() {
+        let store = MemoryArchiveStore::new();
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let mut request = restore_request(None, false);
+        request.source = PathBuf::from("/backups/pgdata-20260926T141500Z");
+        let err = restore(&docker, &store, &progress, &confirm, &request).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "/backups/pgdata-20260926T141500Z is not a .tar.bz2 archive"
+        );
+        assert!(store.unpacked.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failed_import_into_a_new_volume_leaves_it_and_hints_at_overwrite() {
+        let store = intact_archive();
+        let (docker, progress, confirm) = (
+            FakeDocker::default().failing("pgdata"),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let report = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, false),
+        )
+        .unwrap();
+        assert!(matches!(report.outcome, ItemOutcome::Failed { .. }));
+        assert_eq!(report.action, VolumeRestoreAction::Create);
+        assert_eq!(
+            report.hint.as_deref(),
+            Some("volume pgdata was created and may be partially filled; retry with --overwrite")
+        );
+        assert_eq!(report.exit_code(), 1);
+        assert!(
+            docker.volumes.borrow().contains_key("pgdata"),
+            "the tool never removes a volume"
+        );
+        assert!(no_scratch_left(&store));
+    }
+
+    #[test]
+    fn a_failed_import_with_overwrite_has_no_hint() {
+        let store = intact_archive();
+        let (docker, progress, confirm) = (
+            FakeDocker::default()
+                .with_volume("pgdata", b"OLD")
+                .failing("pgdata"),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let report = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, true),
+        )
+        .unwrap();
+        assert!(report.outcome.is_failure());
+        assert_eq!(report.action, VolumeRestoreAction::Overwrite);
+        assert_eq!(report.hint, None);
+        assert_eq!(report.exit_code(), 1);
+    }
+
+    #[test]
+    fn a_failed_create_has_no_hint() {
+        let store = intact_archive();
+        let (docker, progress, confirm) = (
+            FakeDocker::default().failing("create_volume:pgdata"),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let report = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, false),
+        )
+        .unwrap();
+        assert!(report.outcome.is_failure());
+        assert_eq!(report.hint, None);
+        assert_eq!(report.exit_code(), 1);
+        assert_eq!(docker_writes(&docker), vec!["create_volume:pgdata"]);
+    }
+
+    #[test]
+    fn overwrite_for_a_volume_that_does_not_exist_creates_it_without_asking() {
+        let store = intact_archive();
+        let (docker, progress, confirm) = (
+            FakeDocker::default(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let report = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, true),
+        )
+        .unwrap();
+        assert_eq!(report.action, VolumeRestoreAction::Create);
+        assert!(confirm.asked.borrow().is_empty());
+        assert_eq!(
+            docker_writes(&docker),
+            vec!["create_volume:pgdata", "import_volume:pgdata:wipe=false"]
+        );
+    }
+
+    #[test]
+    fn an_unreachable_daemon_is_exit_code_3_after_verification() {
+        let store = intact_archive();
+        let (docker, progress, confirm) = (
+            FakeDocker::unavailable(),
+            RecordingProgress::default(),
+            FakeConfirm::accepting(),
+        );
+        let err = restore(
+            &docker,
+            &store,
+            &progress,
+            &confirm,
+            &restore_request(None, false),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 3);
+        assert_eq!(calls(&docker), vec!["engine_info"]);
+        assert!(no_scratch_left(&store));
     }
 }

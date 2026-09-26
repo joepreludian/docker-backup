@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::domain::manifest::{Compression, DockerInfo, Manifest, ToolInfo};
 use crate::domain::preview::RestorePreview;
@@ -131,6 +132,38 @@ impl VolumeBackupReport {
 
     pub fn exit_code(&self) -> i32 {
         if self.failed_count() > 0 { 1 } else { 0 }
+    }
+}
+
+/// Whether `restore-volume` made the target volume or replaced its contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VolumeRestoreAction {
+    Create,
+    Overwrite,
+}
+
+/// What `restore-volume` did with one archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeRestoreReport {
+    pub source: PathBuf,
+    /// The volume the archive was made from.
+    pub volume: String,
+    /// The volume it went into: `--as`, or `volume`.
+    pub target: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    pub action: VolumeRestoreAction,
+    #[serde(flatten)]
+    pub outcome: ItemOutcome,
+    /// Set only when this run created the volume and then failed to fill it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+impl VolumeRestoreReport {
+    pub fn exit_code(&self) -> i32 {
+        if self.outcome.is_failure() { 1 } else { 0 }
     }
 }
 
@@ -472,5 +505,35 @@ mod tests {
             ),
             (1, 10, 1)
         );
+    }
+
+    #[test]
+    fn volume_restore_report_exit_code_and_json_shape() {
+        let report = VolumeRestoreReport {
+            source: "/b/pgdata-20260926T141500Z.tar.bz2".into(),
+            volume: "pgdata".into(),
+            target: "pgdata2".into(),
+            created_at: datetime!(2026-09-26 14:15:00 UTC),
+            action: VolumeRestoreAction::Create,
+            outcome: ItemOutcome::Done { size_bytes: 2 },
+            hint: None,
+        };
+        assert_eq!(report.exit_code(), 0);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["action"], "create");
+        assert_eq!(json["status"], "done");
+        assert_eq!(json["size_bytes"], 2);
+        assert_eq!(json["created_at"], "2026-09-26T14:15:00Z");
+        assert!(json.get("hint").is_none());
+
+        let failed = VolumeRestoreReport {
+            outcome: ItemOutcome::Failed {
+                error: "boom".into(),
+            },
+            hint: Some("retry".into()),
+            ..report
+        };
+        assert_eq!(failed.exit_code(), 1);
+        assert_eq!(serde_json::to_value(&failed).unwrap()["hint"], "retry");
     }
 }

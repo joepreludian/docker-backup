@@ -112,6 +112,7 @@ impl FakeDocker {
     }
 
     /// Make export/save/import of this name (volume, image tag, or container name) fail.
+    /// `create_volume:<name>` makes only the creation of that volume fail.
     pub fn failing(mut self, name: &str) -> Self {
         self.fail_on.insert(name.to_string());
         self
@@ -250,6 +251,7 @@ impl DockerPort for FakeDocker {
 
     fn create_volume(&self, name: &str) -> AppResult<()> {
         self.record(format!("create_volume:{name}"));
+        self.check(&format!("create_volume:{name}"))?;
         self.volumes
             .borrow_mut()
             .insert(name.to_string(), Vec::new());
